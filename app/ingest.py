@@ -2,8 +2,8 @@
 
     python -m app.ingest --init      create tables (safe to re-run)
     python -m app.ingest --seed      load the fictional sample catalog (wipes product tables!)
-    python -m app.ingest --embed     embed products that have no vector yet
-    python -m app.ingest --reembed   re-embed every product (after changing the embedding model)
+    python -m app.ingest --embed     embed products with no vector yet, or one from another embedding model
+    python -m app.ingest --reembed   re-embed every product (e.g. after changing the query/document prefixes)
 """
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ import numpy as np
 
 from .config import settings
 from .db import connect, run_sql_file
-from .providers import ProviderError, embed_model_label, get_provider
+from .embeddings import embed_model_label, embed_provider
+from .providers import ProviderError, get_provider
 
 PRODUCT_TEXT_SQL = """
 SELECT p.sku, p.name, p.brand, p.category, p.description,
@@ -51,15 +52,20 @@ class EmbedError(RuntimeError):
 
 
 def embed_products(reembed: bool = False, provider=None) -> int:
-    """Embed products without a vector (or all with reembed). Raises ProviderError / EmbedError."""
+    """Embed products without a current vector (or all with reembed). Raises ProviderError / EmbedError."""
     provider = provider or get_provider()
+    model = embed_model_label()
     with connect() as conn:
-        rows = conn.execute(PRODUCT_TEXT_SQL.format(where="" if reembed else "AND p.embedding IS NULL")).fetchall()
+        if reembed:
+            rows = conn.execute(PRODUCT_TEXT_SQL.format(where="")).fetchall()
+        else:   # vectors from another model are not comparable with this model's queries
+            rows = conn.execute(PRODUCT_TEXT_SQL.format(
+                where="AND (p.embedding IS NULL OR p.embedded_with IS DISTINCT FROM %(model)s)"), {"model": model}).fetchall()
         if not rows:
             print("Nothing to embed.")
             return 0
         texts = [product_text(r) for r in rows]
-        print(f"Embedding {len(rows)} products with {provider.name}:{embed_model_label()} ...")
+        print(f"Embedding {len(rows)} products with {embed_provider()}:{model} ...")
         vecs = provider.embed(texts, kind="document")
         if len(vecs[0]) != settings.embed_dim:
             raise EmbedError(f"Embedding size {len(vecs[0])} != EMBED_DIM {settings.embed_dim}. "
@@ -67,7 +73,7 @@ def embed_products(reembed: bool = False, provider=None) -> int:
         with conn.cursor() as cur:
             for r, v in zip(rows, vecs):
                 cur.execute("UPDATE products SET embedding = %s, embedded_with = %s, updated_at = now() WHERE sku = %s",
-                            (np.asarray(v, dtype=np.float32), embed_model_label(), r["sku"]))
+                            (np.asarray(v, dtype=np.float32), model, r["sku"]))
         print(f"Done: {len(rows)} products embedded.")
         return len(rows)
 

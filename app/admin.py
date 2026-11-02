@@ -20,10 +20,12 @@ from pydantic import BaseModel, Field, model_validator
 from . import importer
 from .config import settings
 from .db import connect
+from .embeddings import embed_model_label
 from .ingest import EmbedError, embed_products
 from .models import AVOID, CATEGORIES, CONCERNS, RecommendRequest
 from .providers import ProviderError
 from .recommender import preview
+from .storefront import AssistantSettings, load_assistant, save_assistant
 from .strategy import MAX_BUSINESS_SHARE, PRESETS, RankingSettings, audit, load_ranking, save_ranking
 
 router = APIRouter(prefix="/admin/api", tags=["admin"])
@@ -155,13 +157,39 @@ def post_preview(body: PreviewBody, _: str = Depends(require_admin)):
         raise HTTPException(503, str(e))
 
 
+# ------------------------------------------------------------------ customer assistant (/shop, /store)
+@router.get("/assistant")
+def get_assistant(_: str = Depends(require_admin)):
+    with connect() as conn:
+        s = load_assistant(conn)
+        row = conn.execute("SELECT updated_by, updated_at FROM app_settings WHERE key = 'customer_assistant'").fetchone()
+        usage = conn.execute(
+            """SELECT substr(username, 10) AS channel, count(*) AS messages, count(DISTINCT conversation_id) AS chats,
+                      count(*) FILTER (WHERE result_count > 0) AS with_products,
+                      count(*) FILTER (WHERE status = 'error') AS errors
+               FROM analytics_events WHERE event = 'customer_chat' AND at > now() - interval '30 days'
+               GROUP BY 1""").fetchall()
+        linked = conn.execute("SELECT count(*) FILTER (WHERE product_url IS NOT NULL) AS with_url, count(*) AS total "
+                              "FROM products WHERE is_active").fetchone()
+    return {"settings": s.model_dump(), "usage": {u["channel"]: u for u in usage}, "products": linked,
+            "updated_by": row["updated_by"] if row else None,
+            "updated_at": row["updated_at"].isoformat() if row else None}
+
+
+@router.put("/assistant")
+def put_assistant(body: AssistantSettings, name: str = Depends(require_admin)):
+    with connect() as conn:
+        return {"settings": save_assistant(conn, body, name).model_dump()}
+
+
 # ------------------------------------------------------------------ products: priority & campaigns
 PRODUCTS_SQL = """
 SELECT p.sku, p.name, p.brand, p.category, p.price::float AS price, p.cost::float AS cost,
        COALESCE(p.margin_pct, (p.price - p.cost) / NULLIF(p.price, 0))::float AS margin_pct, p.stock_qty, p.is_active,
        a.suitable_skin_types, a.target_concerns, a.avoid_for, a.min_age, a.max_age,
        COALESCE(a.needs_review, a.sku IS NULL) AS needs_review, a.review_note, a.extracted_by,
-       p.embedding IS NOT NULL AS searchable, p.expiry_date, COALESCE(a.text_flags, '{}') AS text_flags,
+       (p.embedding IS NOT NULL AND p.embedded_with = %(embed_model)s) AS searchable, p.expiry_date,
+       COALESCE(a.text_flags, '{}') AS text_flags,
        EXISTS (SELECT 1 FROM product_ingredients pi WHERE pi.sku = p.sku) AS ingredients_known,
        COALESCE(br.priority, 3) AS priority, COALESCE(br.campaign_boost, 0)::float AS campaign_boost,
        br.valid_from, br.valid_to, COALESCE(br.excluded, FALSE) AS excluded,
@@ -186,7 +214,7 @@ ORDER BY p.is_active DESC, p.category, p.sku
 @router.get("/products")
 def get_products(_: str = Depends(require_admin)):
     with connect() as conn:
-        rows = conn.execute(PRODUCTS_SQL).fetchall()
+        rows = conn.execute(PRODUCTS_SQL, {"embed_model": embed_model_label()}).fetchall()
     for r in rows:
         for k in ("valid_from", "valid_to", "updated_at", "expiry_date"):
             r[k] = r[k].isoformat() if r[k] else None
@@ -352,11 +380,12 @@ def product_detail(sku: str, _: str = Depends(require_admin)):
         p = conn.execute(
             """SELECT p.sku, p.name, p.brand, p.category, p.price::float AS price, p.cost::float AS cost, p.stock_qty,
                       COALESCE(p.margin_pct, (p.price - p.cost) / NULLIF(p.price, 0))::float AS margin_pct,
-                      p.is_active, p.description, p.embedding IS NOT NULL AS searchable,
+                      p.is_active, p.description, (p.embedding IS NOT NULL AND p.embedded_with = %s) AS searchable,
                       a.suitable_skin_types, a.target_concerns, a.avoid_for, a.min_age, a.max_age, a.texture,
                       a.fragrance_free, a.key_benefits, a.needs_review, a.review_note, a.extracted_by,
                       p.expiry_date, COALESCE(a.text_flags, '{}') AS text_flags
-               FROM products p LEFT JOIN product_attributes a USING (sku) WHERE p.sku = %s""", (sku,)).fetchone()
+               FROM products p LEFT JOIN product_attributes a USING (sku) WHERE p.sku = %s""",
+            (embed_model_label(), sku)).fetchone()
         if not p:
             raise HTTPException(404, f"Unknown SKU {sku}")
         p["ingredients"] = conn.execute(
@@ -418,7 +447,7 @@ def update_attributes(sku: str, body: Attributes, name: str = Depends(require_ad
 
 @router.post("/embed-missing")
 def embed_missing(_: str = Depends(require_admin)):
-    """Retry making products searchable (e.g. after the model was unreachable during an import)."""
+    """Make products searchable: after the model was unreachable during an import, or the embedding model changed."""
     try:
         return {"ok": True, "embedded": embed_products(provider=_provider)}
     except (ProviderError, EmbedError) as e:

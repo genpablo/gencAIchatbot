@@ -260,7 +260,7 @@ def _compatible(handler, monkeypatch, **env):
     from app.config import settings
     vals = {"provider": "openai", "llm_base_url": "https://api.example.com/v1/chat/completions/", "llm_api_key": "sk-chat",
             "llm_chat_model": "vendor/chat", "llm_parse_model": "vendor/parse", "llm_embed_model": "vendor/embed",
-            "llm_embed_base_url": "", "llm_embed_api_key": "", "embed_dim": 4, **env}
+            "embed_dim": 4, **env}
     import dataclasses
     monkeypatch.setattr(providers, "settings", dataclasses.replace(settings, **vals))
     return providers.OpenAICompatibleProvider(client=httpx.Client(transport=httpx.MockTransport(handler)),
@@ -274,8 +274,8 @@ def _chat_reply(req):
 def test_get_provider_selects_compatible_and_defaults_to_openrouter_url(monkeypatch):
     from app import providers
     p = _compatible(_chat_reply, monkeypatch, provider="openrouter", llm_base_url="")
-    assert p.base == "https://openrouter.ai/api/v1" and isinstance(providers.get_provider(), providers.OpenAICompatibleProvider)
-    assert providers.embed_model_label() == "vendor/embed"
+    assert p.base == "https://openrouter.ai/api/v1"
+    assert isinstance(providers.get_provider().chat_provider, providers.OpenAICompatibleProvider)
     with pytest.raises(providers.ProviderError, match="LLM_BASE_URL is empty"):
         _compatible(_chat_reply, monkeypatch, llm_base_url="")
 
@@ -315,20 +315,6 @@ def test_openrouter_thinking_off_softens_when_reasoning_is_mandatory(monkeypatch
     assert len(seen) == 3
 
 
-def test_embeddings_can_use_another_service_without_the_chat_key(monkeypatch):
-    seen = []
-
-    def handler(req):
-        seen.append((str(req.url), req.headers.get("authorization")))
-        return httpx.Response(200, json={"data": [{"index": 0, "embedding": [0.0] * 4}]})
-
-    _compatible(handler, monkeypatch, llm_embed_base_url="http://localhost:11434/v1").embed(["x"])
-    assert seen == [("http://localhost:11434/v1/embeddings", None)]
-    seen.clear()
-    _compatible(handler, monkeypatch).embed(["x"])
-    assert seen == [("https://api.example.com/v1/embeddings", "Bearer sk-chat")]
-
-
 def test_compatible_errors_are_explained(monkeypatch):
     from app.providers import ProviderError
     in_body = httpx.Response(200, json={"error": {"code": 502, "message": "upstream died"}})
@@ -346,3 +332,14 @@ def test_compatible_errors_are_explained(monkeypatch):
         _compatible(_chat_reply, monkeypatch, llm_chat_model="").chat("s", "u")
     with pytest.raises(ProviderError, match="No embedding model"):
         _compatible(_chat_reply, monkeypatch, llm_embed_model="").embed(["x"])
+
+
+def test_openrouter_defaults_to_qwen_flash(monkeypatch):
+    seen = []
+
+    def handler(req):
+        seen.append(json.loads(req.content)["model"])
+        return _chat_reply(req)
+
+    _compatible(handler, monkeypatch, provider="openrouter", llm_base_url="", llm_chat_model="", llm_parse_model="").chat("s", "u")
+    assert seen == ["qwen/qwen3.7-flash"]

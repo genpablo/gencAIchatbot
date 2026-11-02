@@ -51,6 +51,7 @@ WHERE p.is_active
   AND NOT COALESCE(br.excluded, FALSE)
   AND (p.stock_qty IS NULL OR p.stock_qty > 0)
   AND p.embedding IS NOT NULL
+  AND p.embedded_with = %(embed_model)s
   AND p.price BETWEEN %(pmin)s AND %(pmax)s
   AND (%(skin)s::text IS NULL OR %(skin)s::text = ANY(a.suitable_skin_types))
   AND (NOT %(sensitive)s OR 'sensitive' = ANY(a.suitable_skin_types))
@@ -67,13 +68,14 @@ LIMIT %(k)s
 """
 
 
-def fetch_candidates(conn, *, qvec, skin, sensitive, avoid, cats, pmin, pmax, k,
+def fetch_candidates(conn, *, qvec, embed_model, skin, sensitive, avoid, cats, pmin, pmax, k,
                      min_shelf: int = 0, hide_unknown: bool = True) -> list[dict[str, Any]]:
     """Hard filters (stock, price, skin type, contraindications, expiry) + vector similarity, in one query.
     Missing data is handled safely: no expiry date = not tracked; no ingredient list = hidden from customers
     who must avoid something (unless the manager chose to show it with a warning)."""
     params = dict(
         qvec=np.asarray(qvec, dtype=np.float32),
+        embed_model=embed_model,
         skin=skin,
         sensitive=bool(sensitive),
         avoid=list(avoid),

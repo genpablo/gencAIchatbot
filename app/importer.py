@@ -47,6 +47,7 @@ COLUMNS = {   # canonical -> accepted header spellings (lower-case, spaces/under
     "expiry":      ["expiry", "expirydate", "expiration", "expirationdate", "exp", "expdate", "expires",
                     "bestbefore", "bestbeforedate", "bbd", "useby", "usebydate"],
     "ingredients": ["ingredients", "ingredientlist", "inci", "incilist", "fullingredients", "composition"],
+    "url":         ["producturl", "url", "link", "productlink", "productpage", "pageurl", "weburl", "shopurl", "website"],
 }
 REQUIRED = ["sku"]                                   # the only column a file must have (e.g. a price-update sheet)
 NEW_PRODUCT_NEEDS = ["name", "price"]               # a NEW product also needs these; description is strongly advised
@@ -204,6 +205,11 @@ def _sku(v: Any) -> str:
     return str(v).strip().lstrip("'").strip()
 
 
+def _url(v: Any) -> str | None:
+    t = _text(v)
+    return t if t and re.match(r"^https?://[^\s/]+\.[^\s]+$", t, re.I) else None
+
+
 def _bool(v: Any) -> bool | None:
     if blank(v):
         return None
@@ -337,6 +343,9 @@ def read_table(filename: str, data: bytes, date_order: str = "MDY") -> dict:
         category = normalise_category(get("category")) if "category" in cols else None
         if "category" in cols and not blank(get("category")) and category is None:
             warns.append(f"Unknown category {get('category')!r}; the AI will decide")
+        url = _url(get("url"))
+        if not blank(get("url")) and url is None:
+            warns.append(f"Product URL {get('url')!r} must start with http:// or https://; ignored")
         description = _text(get("description"))
         ing_col = _text(get("ingredients"))
         if description and len(description) > 8000:
@@ -346,7 +355,7 @@ def read_table(filename: str, data: bytes, date_order: str = "MDY") -> dict:
                "margin_pct": margin,
                "priority": priority,
                "stock": stock, "brand": _text(get("brand")), "category": category, "active": active,
-               "description": description, "ingredients_text": ing_col,
+               "description": description, "ingredients_text": ing_col, "url": url,
                "expiry": expiry.isoformat() if expiry else None}
 
         if not row["sku"]:
@@ -420,7 +429,7 @@ def desc_hash(name: str, description: str) -> str:
 def diff_rows(conn, rows: list[dict]) -> dict:
     db = {r["sku"]: r for r in conn.execute(
         "SELECT p.sku, p.name, p.price::float AS price, p.cost::float AS cost, p.margin_pct::float AS margin_pct, p.stock_qty, p.brand, p.category, "
-        "p.is_active, p.description, p.description_hash, p.expiry_date, COALESCE(br.priority, 3) AS priority, "
+        "p.is_active, p.description, p.description_hash, p.expiry_date, p.product_url, COALESCE(br.priority, 3) AS priority, "
         "a.sku IS NOT NULL AS has_attrs FROM products p "
         "LEFT JOIN product_attributes a USING (sku) LEFT JOIN business_rules br USING (sku)").fetchall()}
     new, changed, unchanged = [], [], []
@@ -456,6 +465,8 @@ def diff_rows(conn, rows: list[dict]) -> dict:
             fields.append("active" if r["active"] else "inactive")
         if r.get("expiry") and (old["expiry_date"] is None or old["expiry_date"].isoformat() != r["expiry"]):
             fields.append(f"expiry → {r['expiry']}")
+        if r.get("url") and old["product_url"] != r["url"]:
+            fields.append("product URL")
         (changed if fields else unchanged).append(
             {"row": r["row"], "sku": r["sku"], "name": name, "changes": fields})
     in_file = {r["sku"] for r in rows if r["sku"]}
@@ -772,10 +783,10 @@ def _import_row(conn, r: dict, provider, use_ai: bool, reanalyze: bool, counts: 
             cat = r.get("category") or "other"
             conn.execute(
                 """INSERT INTO products (sku, name, brand, category, routine_step, price, cost, margin_pct, stock_qty, is_active,
-                                         description, description_hash, expiry_date)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                                         description, description_hash, expiry_date, product_url)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (sku, name, r.get("brand"), cat, ROUTINE_STEP[cat], r["price"], r.get("cost"), r.get("margin_pct"), r.get("stock"),
-                 True if r.get("active") is None else r["active"], desc, h, r.get("expiry")))
+                 True if r.get("active") is None else r["active"], desc, h, r.get("expiry"), r.get("url")))
             action, analyse = "created", True
         else:
             name = r.get("name") or old["name"]                          # empty cell -> keep what is on file
@@ -790,13 +801,15 @@ def _import_row(conn, r: dict, provider, use_ai: bool, reanalyze: bool, counts: 
                        or (r.get("brand") and old["brand"] != r["brand"])
                        or (r.get("active") is not None and old["is_active"] != r["active"])
                        or (r.get("category") and old["category"] != r["category"])
-                       or (r.get("expiry") and str(old["expiry_date"]) != r["expiry"]))
+                       or (r.get("expiry") and str(old["expiry_date"]) != r["expiry"])
+                       or (r.get("url") and old["product_url"] != r["url"]))
             conn.execute(
                 """UPDATE products SET name = %s, price = %s, description = %s, description_hash = %s,
                        brand = COALESCE(%s, brand), cost = COALESCE(%s, cost), margin_pct = COALESCE(%s, margin_pct), stock_qty = COALESCE(%s, stock_qty),
                        is_active = COALESCE(%s, is_active), expiry_date = COALESCE(%s::date, expiry_date),
-                       updated_at = now() WHERE sku = %s""",
-                (name, price, desc, h, r.get("brand"), r.get("cost"), r.get("margin_pct"), r.get("stock"), r.get("active"), r.get("expiry"), sku))
+                       product_url = COALESCE(%s, product_url), updated_at = now() WHERE sku = %s""",
+                (name, price, desc, h, r.get("brand"), r.get("cost"), r.get("margin_pct"), r.get("stock"), r.get("active"), r.get("expiry"),
+                 r.get("url"), sku))
             action = "updated" if changed else "unchanged"
             analyse = (reanalyze or not old["has_attrs"] or old["description_hash"] != h
                        or bool(r.get("category") and r["category"] != old["category"]))
@@ -845,19 +858,20 @@ def template_xlsx() -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = "Products"
-    headers = ["SKU", "Name", "Price", "Description", "Margin (%)", "Priority", "Cost", "Stock", "Brand", "Category", "Active", "Expiry", "Ingredients"]
+    headers = ["SKU", "Name", "Price", "Description", "Margin (%)", "Priority", "Cost", "Stock", "Brand", "Category", "Active", "Expiry", "Ingredients", "Product URL"]
     ws.append(headers)
     ws.append(["SR-101", "Cica Calming Serum", 24.00,
                "A lightweight serum that calms redness and irritation and helps with breakouts. "
                "Suitable for sensitive, oily and combination skin, ages 18 and over. Fragrance-free.\n"
                "Ingredients: Water, Centella Asiatica Extract, Glycerin, Niacinamide, Panthenol, Madecassoside",
-               0.70, 5, 7.20, 120, "Sample", "serum", "yes", "2027-06-30", ""])
+               0.70, 5, 7.20, 120, "Sample", "serum", "yes", "2027-06-30", "",
+               "https://gencbeauty.com/cica-calming-serum/"])
     ws.append(["CR-205", "Ginseng Firming Night Cream", 52.00,
                "Rich night cream for mature, dry skin (40+) that softens fine lines and improves firmness. "
                "Not recommended during pregnancy.\n"
                "Ingredients: Water, Ginseng Root Extract, Shea Butter, Retinol, Adenosine, Fragrance",
-               0.78, 3, 11.50, 25, "Sample", "", "yes", "", ""])
-    for i, w in enumerate([12, 30, 10, 90, 14, 12, 10, 9, 14, 14, 9, 13, 50], start=1):
+               0.78, 3, 11.50, 25, "Sample", "", "yes", "", "", ""])
+    for i, w in enumerate([12, 30, 10, 90, 14, 12, 10, 9, 14, 14, 9, 13, 50, 40], start=1):
         ws.column_dimensions[chr(64 + i)].width = w
     req = PatternFill("solid", fgColor="F9D5E1")
     opt = PatternFill("solid", fgColor="EEEEEE")
@@ -888,7 +902,8 @@ def template_xlsx() -> bytes:
         ("", False),
         ("Required (pink): SKU, Name, Price, Description.", False),
         ("Optional (grey): Margin (%), Priority (1-5), Cost (fallback when Margin is unknown), Stock (empty = always available), Brand, Category, Active (yes/no),", False),
-        ("  Expiry (e.g. 2027-06-30 or 06/2027; empty = not tracked), Ingredients (if not already in the description).", False),
+        ("  Expiry (e.g. 2027-06-30 or 06/2027; empty = not tracked), Ingredients (if not already in the description),", False),
+        ("  Product URL (the product's page on the online shop; the online customer assistant links to it).", False),
         ("", False),
         ("Empty cells are fine:", True),
         ("- Leave a cell empty (or write N/A) if you don't know the value. For a product that already exists, an empty cell keeps the current value.", False),

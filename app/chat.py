@@ -197,6 +197,7 @@ def match_products(conn, message: str, limit: int = 3) -> list[str]:
 def product_facts(conn, skus: list[str]) -> list[dict]:
     rows = conn.execute(
         """SELECT p.sku, p.name, p.brand, p.category, p.price::float AS price, p.stock_qty, p.expiry_date, p.description,
+                  p.product_url,
                   a.suitable_skin_types, a.target_concerns, a.avoid_for, COALESCE(a.text_flags, '{}') AS text_flags,
                   a.min_age, a.max_age, a.key_benefits,
                   (SELECT array_agg(i.inci_name ORDER BY pi.position) FROM product_ingredients pi
@@ -223,7 +224,8 @@ def product_card(r: dict) -> dict:
     return {"sku": r["sku"], "name": r["name"], "brand": r.get("brand"), "category": r["category"], "price": r["price"],
             "ages": _ages(r) or None, "key_benefits": (r.get("key_benefits") or [])[:3],
             "key_ingredients": (r.get("ingredients") or [])[:6], "flags": flags, "notes": notes,
-            "skin_types": r.get("suitable_skin_types") or [], "concerns": r.get("target_concerns") or []}
+            "skin_types": r.get("suitable_skin_types") or [], "concerns": r.get("target_concerns") or [],
+            "product_url": r.get("product_url")}
 
 
 QA_SYSTEM = """You help a K-beauty store employee answer a question about specific products.
@@ -250,10 +252,10 @@ def _facts_for_llm(rows: list[dict], eligible: set[str] | None = None) -> str:
     return "\n".join(out)
 
 
-def rule_answer(rows: list[dict], question: str) -> str:
+def rule_answer(rows: list[dict], question: str, show_sku: bool = True) -> str:
     lines = []
     for r in rows:
-        bits = [f"**{r['name']}** ({r['sku']}, {money(r['price'])}) is a {r['category']}"]
+        bits = [f"**{r['name']}** ({r['sku'] + ', ' if show_sku else ''}{money(r['price'])}) is a {r['category']}"]
         if r.get("suitable_skin_types"):
             bits.append(f" for {', '.join(r['suitable_skin_types'])} skin")
         if r.get("target_concerns"):
@@ -309,6 +311,10 @@ WELCOME = ("Tell me about the customer and I'll suggest products, best match fir
            "or *Which of our products have niacinamide?*")
 
 
+def is_product_question(message: str, skus: list[str]) -> bool:
+    return bool(skus) and bool(QUESTION_RE.search(message) or len(message.split()) <= 6)
+
+
 def is_open_question(message: str) -> bool:
     """A question to answer in its own right (ingredients, origin, product types...), not a request for a routine."""
     return bool(QUESTION_RE.search(message)) and not RECOMMEND_RE.search(message)
@@ -356,9 +362,33 @@ Rules:
 - Keep the answer under 150 words, friendly and practical.
 Return ONLY JSON: {"answer": "...", "recommend": [{"sku": "...", "reason": "..."}]}"""
 
+# Who the assistant talks to: staff here; customers in app/storefront.py
+STAFF_VOICE = {"qa": QA_SYSTEM, "open": OPEN_SYSTEM, "lead": "**From our range, I'd suggest:**",
+               "unknown": "I don't have a detailed answer to that on file, so please check with a manager."}
+
+
+def product_answer(conn, provider, ranking, profile: CustomerProfile, state: dict, message: str, skus: list[str],
+                   voice: dict = STAFF_VOICE) -> dict:
+    """Answer a question about the named products from their facts on file."""
+    rows = product_facts(conn, skus)
+    text, used_llm = None, False
+    if ranking.use_llm_rerank and provider is not None:
+        try:
+            data = extract_json(provider.chat(voice["qa"], f"Question: {message}\n\nProduct facts (one JSON per line):\n"
+                                              + _facts_for_llm(rows), role="rank")) or {}
+            text = sanitize(str(data.get("answer") or ""), 1200) or None
+            used_llm = bool(text)
+        except Exception as e:                        # model down: fall back to facts
+            log.warning("product question fell back to rules: %s", e)
+    return {"intent": "product_question", "profile": profile, "state": state, "used_llm": used_llm,
+            "model": provider.model_label("rank") if used_llm else "rules", "skus": skus,
+            "content": text or rule_answer(rows, message, voice.get("show_sku", True)),
+            "payload": {"type": "products", "products": [product_card(r) for r in rows],
+                        "suggestions": suggestions(profile, state)}}
+
 
 def open_answer(conn, provider, user: dict, ranking, kept: CustomerProfile, turn: CustomerProfile,
-                state: dict, message: str) -> dict:
+                state: dict, message: str, voice: dict = STAFF_VOICE) -> dict:
     """Answer a broader question from catalog facts (and general knowledge), then recommend our products.
     `turn` is the customer plus anything the question adds (for this answer only); `kept` is what is remembered.
     Recommendations come only from products that passed the customer's safety, stock and budget filters."""
@@ -375,7 +405,7 @@ def open_answer(conn, provider, user: dict, ranking, kept: CustomerProfile, turn
         who = describe(turn)
         try:
             data = extract_json(provider.chat(
-                OPEN_SYSTEM, f"Question: {message}\n" + (f"Customer: {who}\n" if who else "")
+                voice["open"], f"Question: {message}\n" + (f"Customer: {who}\n" if who else "")
                 + "\nCatalog facts (one JSON per line):\n" + _facts_for_llm(rows, set(by_sku)), role="rank")) or {}
             text = sanitize(str(data.get("answer") or ""), 1500) or None
             for o in data.get("recommend") or []:
@@ -387,8 +417,7 @@ def open_answer(conn, provider, user: dict, ranking, kept: CustomerProfile, turn
             log.warning("open question fell back to rules: %s", e)
     if not text:
         named = [facts[s] for s in mentioned if s in facts][:3]
-        text = (rule_answer(named, message) if named else
-                "I don't have a detailed answer to that on file, so please check with a manager.")
+        text = rule_answer(named, message, voice.get("show_sku", True)) if named else voice["unknown"]
     # always end with something to offer: products the question names first, then the best-scored ones
     for c in sorted(eligible, key=lambda c: c["sku"] not in mentioned):
         if len(picks) >= 3:
@@ -399,7 +428,7 @@ def open_answer(conn, provider, user: dict, ranking, kept: CustomerProfile, turn
     cards = [{**product_card(facts[s]), "reason": r or template_reason(by_sku[s], turn)} for s, r in picks]
     log_id = None
     if cards:
-        text += "\n\n**From our range, I'd suggest:**"
+        text += "\n\n" + voice["lead"]
         log_id = log_recommendation(
             conn, employee_id=user["username"], request={"question": message}, profile=turn.model_dump(),
             candidates=[{"sku": c["sku"], "score": c["score"]} for c in eligible],
@@ -426,22 +455,8 @@ def answer(conn, provider, user: dict, conv: dict, message: str) -> dict:
                 "suggestions": suggestions(CustomerProfile(), {}), "profile_constraints": []}}
 
     skus = match_products(conn, message)
-    if skus and (QUESTION_RE.search(message) or len(message.split()) <= 6):
-        rows = product_facts(conn, skus)
-        text, used_llm = None, False
-        if ranking.use_llm_rerank and provider is not None:
-            try:
-                data = extract_json(provider.chat(QA_SYSTEM, f"Question: {message}\n\nProduct facts (one JSON per line):\n"
-                                                  + _facts_for_llm(rows), role="rank")) or {}
-                text = sanitize(str(data.get("answer") or ""), 1200) or None
-                used_llm = bool(text)
-            except Exception as e:                    # model down: fall back to facts
-                log.warning("product question fell back to rules: %s", e)
-        return {"intent": "product_question", "profile": profile, "state": state, "used_llm": used_llm,
-                "model": provider.model_label("rank") if used_llm else "rules", "skus": skus,
-                "content": text or rule_answer(rows, message),
-                "payload": {"type": "products", "products": [product_card(r) for r in rows],
-                            "suggestions": suggestions(profile, state)}}
+    if is_product_question(message, skus):
+        return product_answer(conn, provider, ranking, profile, state, message, skus)
 
     if GREETING_RE.search(message) and not (profile.skin_type or profile.concerns):
         return {"intent": "clarify", "profile": profile, "state": state,

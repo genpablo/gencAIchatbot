@@ -21,15 +21,29 @@ def _env(key: str, default: str) -> str:
 
 @dataclass(frozen=True)
 class Settings:
-    database_url: str = _env("DATABASE_URL", "postgresql://rag:rag@localhost:5432/kbeauty")
+    database_url: str = _env("DATABASE_URL", "postgresql://rag:rag@127.0.0.1:5432/kbeauty")
 
     # ollama (local testing) | bedrock (Amazon) | foundry (Microsoft Azure) | mock (no model, for CI)
     # openai (any OpenAI-compatible service) | openrouter (the same, OpenRouter's URL by default)
     provider: str = _env("LLM_PROVIDER", "ollama").lower()
 
-    # Every embedding model must output this size. 1024 works for bge-m3 (local),
-    # Cohere Embed v4 and Titan Text Embeddings V2 (Bedrock).
+    # --- Embeddings (independent of the chat model; see app/embeddings.py) ---
+    # Empty = same service as LLM_PROVIDER. Or ollama | openai | openrouter | foundry | bedrock | mock,
+    # or your own class as package.module:ClassName.
+    embed_provider: str = _env("EMBED_PROVIDER", "").strip()
+    # Empty = that service's own setting (OLLAMA_EMBED_MODEL, LLM_EMBED_MODEL, FOUNDRY_EMBED_DEPLOYMENT ...)
+    embed_model: str = _env("EMBED_MODEL", "")
+    # Only for openai/openrouter embeddings from another service than chat (the chat key is not sent there)
+    embed_base_url: str = _env("EMBED_BASE_URL", "") or _env("LLM_EMBED_BASE_URL", "")
+    embed_api_key: str = _env("EMBED_API_KEY", "") or _env("LLM_EMBED_API_KEY", "")
+    # Every embedding model must output this size. 1024 works for Qwen3-Embedding-0.6B, bge-m3,
+    # Cohere Embed v4, Titan V2, and Matryoshka models shortened to it (Qwen3-Embedding 4B/8B, text-embedding-3).
     embed_dim: int = int(_env("EMBED_DIM", "1024"))
+    # Shorten longer vectors to EMBED_DIM: auto (only models trained for it) | true | false
+    embed_truncate: str = _env("EMBED_TRUNCATE", "auto").lower()
+    # Text put before queries / product texts. Unset = the model's recommended prefix, if it has one.
+    embed_query_prefix: str | None = os.environ.get("EMBED_QUERY_PREFIX")
+    embed_document_prefix: str | None = os.environ.get("EMBED_DOCUMENT_PREFIX")
 
     # Ask reasoning models (DeepSeek Flash, GPT Luna / GPT-5+, Claude Sonnet 5.5, Qwen3) not to think:
     # thinking tokens are billed as output and slow answers down, and these tasks do not need them.
@@ -39,7 +53,7 @@ class Settings:
     ollama_url: str = _env("OLLAMA_URL", "http://localhost:11434")
     ollama_chat_model: str = _env("OLLAMA_CHAT_MODEL", "qwen3.5:9b")
     ollama_parse_model: str = _env("OLLAMA_PARSE_MODEL", "qwen3.5:9b")
-    ollama_embed_model: str = _env("OLLAMA_EMBED_MODEL", "bge-m3")
+    ollama_embed_model: str = _env("OLLAMA_EMBED_MODEL", "qwen3-embedding:0.6b")
     ollama_disable_thinking: bool = _env("OLLAMA_DISABLE_THINKING", _env("DISABLE_THINKING", "true")).lower() == "true"
     ollama_timeout_s: float = float(_env("OLLAMA_TIMEOUT_S", "300"))
 
@@ -64,10 +78,7 @@ class Settings:
     llm_api_key: str = _env("LLM_API_KEY", "")                       # empty = no Authorization header (local servers)
     llm_chat_model: str = _env("LLM_CHAT_MODEL", "")
     llm_parse_model: str = _env("LLM_PARSE_MODEL", "") or _env("LLM_CHAT_MODEL", "")
-    llm_embed_model: str = _env("LLM_EMBED_MODEL", "")
-    # Only for embeddings from another service; empty = same service and key as chat
-    llm_embed_base_url: str = _env("LLM_EMBED_BASE_URL", "")
-    llm_embed_api_key: str = _env("LLM_EMBED_API_KEY", "")
+    llm_embed_model: str = _env("LLM_EMBED_MODEL", "")             # e.g. qwen/qwen3-embedding-8b
     llm_timeout_s: float = float(_env("LLM_TIMEOUT_S", "120"))
 
     # Prices in the database are in this currency (used for budget parsing and display)
@@ -88,6 +99,11 @@ class Settings:
     # --- Staff chat app (/) ---
     staff_session_days: int = int(_env("STAFF_SESSION_DAYS", "30"))
     brand_name: str = _env("BRAND_NAME", "Gen C Beauty")
+    # --- Customer assistant (/shop online, /store in store; set up in the admin portal) ---
+    # Messages per visitor: every message may call the AI, and these pages need no login
+    public_chat_per_minute: int = int(_env("PUBLIC_CHAT_PER_MINUTE", "8"))
+    public_chat_per_hour: int = int(_env("PUBLIC_CHAT_PER_HOUR", "60"))
+
     brand_logo_url: str = _env("BRAND_LOGO_URL", "https://cdn11.bigcommerce.com/s-kzkmuqjqk9/images/stencil/original/download1_1659212301__04676.original.png")
 
 
