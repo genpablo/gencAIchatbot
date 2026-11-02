@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import re
 import time
 from collections import defaultdict
 from datetime import date
@@ -381,7 +382,7 @@ def product_detail(sku: str, _: str = Depends(require_admin)):
             """SELECT p.sku, p.name, p.brand, p.category, p.price::float AS price, p.cost::float AS cost, p.stock_qty,
                       COALESCE(p.margin_pct, (p.price - p.cost) / NULLIF(p.price, 0))::float AS margin_pct,
                       p.margin_pct::float AS margin_direct,
-                      p.is_active, p.description, (p.embedding IS NOT NULL AND p.embedded_with = %s) AS searchable,
+                      p.is_active, p.image_url, p.description, (p.embedding IS NOT NULL AND p.embedded_with = %s) AS searchable,
                       a.suitable_skin_types, a.target_concerns, a.avoid_for, a.min_age, a.max_age, a.texture,
                       a.fragrance_free, a.key_benefits, a.needs_review, a.review_note, a.extracted_by,
                       p.expiry_date, COALESCE(a.text_flags, '{}') AS text_flags
@@ -396,7 +397,7 @@ def product_detail(sku: str, _: str = Depends(require_admin)):
                                     "concerns": CONCERNS, "avoid": AVOID}}
 
 
-COMMERCIAL = ("price", "cost", "margin_pct", "stock_qty")   # whitelisted column names for update_attributes
+COMMERCIAL = ("price", "cost", "margin_pct", "stock_qty", "image_url")   # whitelisted columns; not in the search text
 
 
 class Attributes(BaseModel):
@@ -415,6 +416,7 @@ class Attributes(BaseModel):
     cost: Optional[float] = Field(None, ge=0, le=1_000_000)
     margin_pct: Optional[float] = Field(None, ge=0, le=1)
     stock_qty: Optional[int] = Field(None, ge=0)
+    image_url: Optional[str] = Field(None, max_length=2000)   # null / "" = no photo
 
     @model_validator(mode="after")
     def _check(self):
@@ -422,6 +424,10 @@ class Attributes(BaseModel):
             raise ValueError("Unknown category")
         if "price" in self.model_fields_set and self.price is None:
             raise ValueError("Price can't be empty")
+        if "image_url" in self.model_fields_set:      # (assigning it would mark it as sent)
+            self.image_url = (self.image_url or "").strip() or None
+        if self.image_url and not re.match(r"https?://\S+$", self.image_url, re.I):
+            raise ValueError("Image URL must start with http:// or https://")
         self.suitable_skin_types = [x for x in self.suitable_skin_types if x in importer.SKIN_ALL]
         self.target_concerns = [x for x in self.target_concerns if x in CONCERNS]
         self.avoid_for = [x for x in self.avoid_for if x in AVOID]
@@ -436,7 +442,7 @@ def update_attributes(sku: str, body: Attributes, name: str = Depends(require_ad
     from .models import ROUTINE_STEP
     with connect() as conn:
         old = conn.execute("SELECT p.category, p.is_active, p.price::float AS price, p.cost::float AS cost, "
-                           "p.margin_pct::float AS margin_pct, p.stock_qty, a.suitable_skin_types, a.target_concerns, "
+                           "p.margin_pct::float AS margin_pct, p.stock_qty, p.image_url, a.suitable_skin_types, a.target_concerns, "
                            "a.avoid_for, a.min_age, a.max_age, a.key_benefits FROM products p "
                            "LEFT JOIN product_attributes a USING (sku) WHERE p.sku = %s", (sku,)).fetchone()
         if not old:

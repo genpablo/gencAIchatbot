@@ -318,7 +318,14 @@ def test_manual_edit_of_price_cost_margin_stock(client):
     p = client.get("/admin/api/products/NW-003").json()["product"]
     assert p["margin_direct"] is None and abs(p["margin_pct"] - (31.5 - 12) / 31.5) < 1e-6    # falls back to price/cost
     assert p["stock_qty"] is None and p["price"] == 31.5                                       # unsent price kept
-    for bad in ({"price": None}, {"price": -1}, {"margin_pct": 1.5}, {"stock_qty": -2}):
+    img = "https://cdn11.bigcommerce.com/s-x/products/3/images/7/serum.jpg"
+    client.put("/admin/api/products/NW-003/attributes", json={**body, "image_url": f"  {img} "})
+    assert client.get("/admin/api/products/NW-003").json()["product"]["image_url"] == img
+    client.put("/admin/api/products/NW-003/attributes", json=body)                     # not sent: kept
+    assert client.get("/admin/api/products/NW-003").json()["product"]["image_url"] == img
+    client.put("/admin/api/products/NW-003/attributes", json={**body, "image_url": ""})  # cleared: no photo
+    assert client.get("/admin/api/products/NW-003").json()["product"]["image_url"] is None
+    for bad in ({"price": None}, {"price": -1}, {"margin_pct": 1.5}, {"stock_qty": -2}, {"image_url": "serum.jpg"}):
         assert client.put("/admin/api/products/NW-003/attributes", json={**body, **bad}).status_code == 422
 
 

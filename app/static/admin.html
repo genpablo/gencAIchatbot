@@ -38,6 +38,7 @@
   h2 { font-size:16px; margin:0 0 4px; } .sub { color:var(--quiet); margin:0 0 16px; font-size:13px; }
   h3 { font-size:14px; margin:20px 0 8px; }
   button.btn { border:1px solid var(--line); background:var(--card); color:var(--ink); padding:7px 14px; border-radius:8px; font:inherit; cursor:pointer; }
+  .thumb { margin-top:6px; color:var(--bad); font-size:12px; } .thumb img { max-height:110px; max-width:160px; border:1px solid var(--line); border-radius:6px; background:#fff; }
   button.danger { color:var(--bad); border-color:var(--bad); }
   button.primary { background:var(--accent); border-color:var(--accent); color:var(--on-accent); font-family:"Nunito",Arial,sans-serif; font-weight:800; text-transform:uppercase; letter-spacing:.02em; font-size:12.5px; border-radius:5px; }
   .chart rect.bar:hover { opacity:.75; }
@@ -706,6 +707,9 @@ async function openDetail(sku) {
       <b>Margin (%)</b><div><input type="number" name="margin" min="0" max="100" step="0.1" value="${p.margin_direct != null ? +(p.margin_direct * 100).toFixed(2) : ""}" style="width:120px">
         <span class="note">Empty = calculated from price and cost${p.margin_direct == null && p.margin_pct != null ? ` (now ${pct(p.margin_pct, 1)})` : ""}</span></div>
       <b>Stock</b><div><input type="number" name="stock" min="0" step="1" value="${p.stock_qty ?? ""}" style="width:120px"> <span class="note">Empty = not tracked (treated as in stock); 0 = out of stock</span></div>
+      <b>Image URL</b><div><input type="url" name="image" pattern="https?://\\S+" value="${esc(p.image_url ?? "")}" placeholder="https://cdn11.bigcommerce.com/..." style="width:100%">
+        <div class="note">The photo on the customer assistant's product cards. Empty = no photo.</div>
+        <div class="thumb" id="dlgThumb"></div></div>
     </div>
     <h3>What the recommender uses (edit if the AI got it wrong)</h3>
     <div class="formgrid">
@@ -719,6 +723,10 @@ async function openDetail(sku) {
       <b>Key benefits</b><div><textarea name="benefits" rows="3">${esc((p.key_benefits || []).join("\n"))}</textarea><div class="note">One per line. Staff see these on each recommendation.</div></div>
       <b>Active</b><label><input type="checkbox" name="active" ${p.is_active ? "checked" : ""}> Recommend this product</label>
     </div>`;
+  const thumb = () => { const u = $("#dlgForm [name=image]").value.trim();
+    $("#dlgThumb").innerHTML = /^https?:\/\/\S+$/i.test(u)
+      ? `<img src="${esc(u)}" alt="" onerror="this.parentNode.textContent='This link does not load an image; customers will see no photo.'">` : ""; };
+  $("#dlgForm [name=image]").oninput = thumb; thumb();
   $("#dlg").showModal();
 }
 $("#dlgSave").onclick = async e => {
@@ -729,7 +737,8 @@ $("#dlgSave").onclick = async e => {
     key_benefits: f.querySelector('[name="benefits"]').value.split("\n"), is_active: f.querySelector('[name="active"]').checked,
     expiry_date: f.querySelector('[name="expiry"]').value || null,
     price: num("price") === "" ? null : +num("price"), cost: num("cost") === "" ? null : +num("cost"),
-    margin_pct: num("margin") === "" ? null : +num("margin") / 100, stock_qty: num("stock") === "" ? null : +num("stock")};
+    margin_pct: num("margin") === "" ? null : +num("margin") / 100, stock_qty: num("stock") === "" ? null : +num("stock"),
+    image_url: num("image").trim() || null};
   if (!f.reportValidity()) return;
   try {
     const r = await api("/products/" + encodeURIComponent(DETAIL.product.sku) + "/attributes", {method:"PUT", body: JSON.stringify(body)});
