@@ -25,6 +25,7 @@ staff message ─> chat (app/chat.py): remembers the customer, follow-ups, produ
 | `ollama` | `qwen3.5:9b` (local) | `bge-m3` (local, 1024-d) | Local testing, no cloud |
 | `bedrock` | Claude Sonnet 5 / Haiku 4.5, Qwen3, DeepSeek V3.2 | Cohere Embed v4 (1024-d) | Production on AWS |
 | `foundry` | Your Microsoft Foundry deployments (GPT-4.1/5, DeepSeek, Llama, Grok, ...) | e.g. `text-embedding-3-large` at 1024-d | Production on Azure |
+| `openai` / `openrouter` | Any model on an OpenAI-compatible service | Same or another service, at 1024-d | Third-party providers |
 | `mock` | none (rule-based) | hash vectors | Tests |
 
 ## 1. Local testing (Ollama + Qwen 3.5 9B)
@@ -194,14 +195,29 @@ reject JSON mode or temperature are retried automatically; rate limits (429) are
 Claude is not served on that endpoint: use `LLM_PROVIDER=bedrock` for Claude.
 Embeddings are requested at `EMBED_DIM` (1024); a model with a fixed different size is reported clearly.
 
+**Third-party providers (OpenRouter, OpenAI, Together, vLLM, LM Studio, ...)**: anything with an OpenAI-compatible
+API. For OpenRouter, `LLM_PROVIDER=openrouter` and in `.env`:
+```
+LLM_API_KEY=...
+LLM_CHAT_MODEL=openai/gpt-4.1-mini      # model id as the service lists it
+LLM_PARSE_MODEL=                        # optional cheaper model for reading notes/descriptions
+LLM_EMBED_MODEL=openai/text-embedding-3-large
+```
+For any other service, use `LLM_PROVIDER=openai` and set `LLM_BASE_URL` (e.g. `https://api.together.xyz/v1`).
+The embedding model must output `EMBED_DIM` values; models with a fixed other size are reported clearly.
+If the service has no embeddings (e.g. Groq), take them from another one with `LLM_EMBED_BASE_URL` and
+`LLM_EMBED_API_KEY`; `http://localhost:11434/v1` uses local Ollama with `LLM_EMBED_MODEL=bge-m3`.
+Customer notes and product data go to the service you choose, so check its data retention terms.
+
 **Thinking off (`DISABLE_THINKING=true`, the default).** Reasoning models think before answering unless told
 not to, and those tokens are billed as output (they can double the cost per message) and slow the chat down.
 The app asks every model not to think and learns, on the first call per model, which request fields it accepts:
 
 | Model | What is sent | Dropped automatically if the model rejects it |
 | --- | --- | --- |
-| GPT Luna, GPT-5+, o-series (Foundry) | `reasoning_effort: none` (then `minimal`, `low`) | `temperature`; `max_tokens` becomes `max_completion_tokens` |
-| DeepSeek Flash / V3.1+ (Foundry) | `thinking: disabled` | |
+| GPT Luna, GPT-5+, o-series (Foundry, other OpenAI-compatible) | `reasoning_effort: none` (then `minimal`, `low`) | `temperature`; `max_tokens` becomes `max_completion_tokens` |
+| DeepSeek Flash / V3.1+ (Foundry, other OpenAI-compatible) | `thinking: disabled` | |
+| Any model on OpenRouter | `reasoning: {effort: none}` (then `low`) | `temperature` |
 | Claude on Bedrock | `thinking: disabled`, Sonnet 5.5 `between_tools`, Opus 5.5 `effort: low` | `temperature` (Claude 4.7+ accept only the default) |
 | Qwen3 / Qwen3.5 (Ollama) | `think: false` | |
 

@@ -24,6 +24,7 @@ class Settings:
     database_url: str = _env("DATABASE_URL", "postgresql://rag:rag@localhost:5432/kbeauty")
 
     # ollama (local testing) | bedrock (Amazon) | foundry (Microsoft Azure) | mock (no model, for CI)
+    # openai (any OpenAI-compatible service) | openrouter (the same, OpenRouter's URL by default)
     provider: str = _env("LLM_PROVIDER", "ollama").lower()
 
     # Every embedding model must output this size. 1024 works for bge-m3 (local),
@@ -57,6 +58,17 @@ class Settings:
     foundry_parse_deployment: str = _env("FOUNDRY_PARSE_DEPLOYMENT", "") or _env("FOUNDRY_CHAT_DEPLOYMENT", "gpt-4.1-mini")
     foundry_embed_deployment: str = _env("FOUNDRY_EMBED_DEPLOYMENT", "text-embedding-3-large")
     foundry_timeout_s: float = float(_env("FOUNDRY_TIMEOUT_S", "120"))
+
+    # --- Any OpenAI-compatible service (OpenRouter, OpenAI, Together, vLLM ...) ---
+    llm_base_url: str = _env("LLM_BASE_URL", "")
+    llm_api_key: str = _env("LLM_API_KEY", "")                       # empty = no Authorization header (local servers)
+    llm_chat_model: str = _env("LLM_CHAT_MODEL", "")
+    llm_parse_model: str = _env("LLM_PARSE_MODEL", "") or _env("LLM_CHAT_MODEL", "")
+    llm_embed_model: str = _env("LLM_EMBED_MODEL", "")
+    # Only for embeddings from another service; empty = same service and key as chat
+    llm_embed_base_url: str = _env("LLM_EMBED_BASE_URL", "")
+    llm_embed_api_key: str = _env("LLM_EMBED_API_KEY", "")
+    llm_timeout_s: float = float(_env("LLM_TIMEOUT_S", "120"))
 
     # Prices in the database are in this currency (used for budget parsing and display)
     currency: str = _env("CURRENCY", "USD").upper()
