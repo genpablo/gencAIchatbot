@@ -254,6 +254,31 @@ class CustomerChatBody(BaseModel):
     message: str = Field(..., min_length=1, max_length=1000)
 
 
+class HistoryBody(BaseModel):
+    channel: Channel = "online"
+    conversation: str = Field(..., max_length=64)
+
+
+@router.post("/history")
+def history(body: HistoryBody):
+    """The messages of the customer's conversation, so the chat bubble keeps them across shop pages.
+    POST, so the token stays out of URLs and logs."""
+    with connect() as conn:
+        s = _settings(conn, body.channel)
+        _require_schema(conn)
+        conv = conn.execute("SELECT id FROM chat_conversations WHERE access_token = %s AND channel = %s "
+                            "AND user_id IS NULL AND NOT archived", (body.conversation, body.channel)).fetchone()
+        if not conv:
+            raise HTTPException(404, "Conversation not found")
+        rows = conn.execute("SELECT role, content, payload FROM chat_messages WHERE conversation_id = %s "
+                            "ORDER BY id DESC LIMIT 40", (conv["id"],)).fetchall()
+    if not s.links(body.channel):            # links switched off since: don't show the old ones
+        for r in rows:
+            for c in (r["payload"] or {}).get("products") or []:
+                c["url"] = None
+    return {"messages": [{"role": r["role"], "content": r["content"], "payload": r["payload"] or {}} for r in reversed(rows)]}
+
+
 @router.post("/chat")
 def customer_chat(body: CustomerChatBody, request: Request):
     t0 = time.perf_counter()

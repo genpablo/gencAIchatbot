@@ -300,9 +300,24 @@
     </div>
   </div>
   <div class="card">
-    <h2>Embed on the online shop</h2>
-    <p class="sub">Paste this into a page or the theme footer on gencbeauty.com. Product links open in the shop window, not inside the frame.</p>
-    <textarea id="asEmbed" readonly style="min-height:72px;font-family:monospace;font-size:12px"></textarea>
+    <h2>Add the chat bubble to the BigCommerce shop</h2>
+    <p class="sub">Shows an "Ask us" button on every page of gencbeauty.com. The chat keeps its messages while the customer browses,
+      and "View product" opens the product page in the shop.</p>
+    <ol class="note" style="line-height:1.7;padding-left:18px">
+      <li>In BigCommerce admin, go to <b>Storefront &gt; Script Manager &gt; Create a Script</b>.</li>
+      <li>Name: <i>Gen C Beauty assistant</i>. Placement: <b>Footer</b>. Location: <b>All pages</b>.
+        Script category: <b>Functional</b>. Script type: <b>Script</b>.</li>
+      <li>Paste the script below and save. Open the shop in a private window to check the bubble.</li>
+    </ol>
+    <textarea id="asScript" readonly style="min-height:48px;font-family:monospace;font-size:12px"></textarea>
+    <p class="note" id="asHttps"></p>
+    <p class="note">If <b>Settings &gt; Security &amp; Privacy &gt; Content-Security-Policy</b> is turned on in BigCommerce, add
+      <code id="asOrigin"></code> to its allowed script and frame sources.
+      If the shop also runs on another domain, add it to <code>SHOP_EMBED_ORIGINS</code> on this server.</p>
+    <details><summary>Show the chat on its own page instead</summary>
+      <p class="note">Storefront &gt; Web Pages &gt; Create a Web Page, switch the editor to HTML (&lt;/&gt;) and paste:</p>
+      <textarea id="asEmbed" readonly style="min-height:60px;font-family:monospace;font-size:12px"></textarea>
+    </details>
   </div>
 </section>
 
@@ -645,7 +660,11 @@ async function loadAssistant() {
   const use = u => u ? `Last 30 days: ${u.chats} chats, ${u.messages} messages${u.errors ? `, ${u.errors} errors` : ""}.` : "Not used in the last 30 days.";
   $("#asOnlineUse").textContent = use(d.usage.online); $("#asStoreUse").textContent = use(d.usage.store);
   $("#asUrls").textContent = `${d.products.with_url} of ${d.products.total} active products have a product page URL (Product URL column in the import sheet).`;
-  $("#asEmbed").value = `<iframe src="${location.origin}/shop" title="Gen C Beauty assistant" style="width:100%;max-width:440px;height:640px;border:1px solid #ddd;border-radius:8px"></iframe>`;
+  $("#asScript").value = `<script src="${location.origin}/widget.js" defer></` + `script>`;
+  $("#asEmbed").value = `<iframe src="${location.origin}/shop" title="Gen C Beauty assistant" style="width:100%;max-width:640px;height:680px;border:1px solid #ddd;border-radius:8px"></iframe>`;
+  $("#asOrigin").textContent = location.origin;
+  $("#asHttps").textContent = location.protocol === "https:" ? "" :
+    "This admin page is not on HTTPS. The shop runs on HTTPS, so use the app's public HTTPS address (for example the Azure Container Apps URL) in the script.";
   renderAssistant();
 }
 function renderAssistant() {
