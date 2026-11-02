@@ -103,6 +103,10 @@ class Settings:
     # Messages per visitor: every message may call the AI, and these pages need no login
     public_chat_per_minute: int = int(_env("PUBLIC_CHAT_PER_MINUTE", "8"))
     public_chat_per_hour: int = int(_env("PUBLIC_CHAT_PER_HOUR", "60"))
+    # Sites allowed to show /shop in a frame (the BigCommerce chat bubble); space-separated, * wildcards allowed.
+    # No other site may frame any page of this app.
+    shop_embed_origins: str = _env("SHOP_EMBED_ORIGINS",
+                                   "https://gencbeauty.com https://www.gencbeauty.com https://*.mybigcommerce.com")
 
     brand_logo_url: str = _env("BRAND_LOGO_URL", "https://cdn11.bigcommerce.com/s-kzkmuqjqk9/images/stencil/original/download1_1659212301__04676.original.png")
 

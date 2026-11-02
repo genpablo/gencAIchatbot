@@ -2,6 +2,7 @@
 
   /         staff chat app (sign in with a staff account; works on phone, iPad and desktop)
   /shop     customer assistant for the online shop (no login; product cards link to the shop)
+  /widget.js  chat bubble that shows /shop on every BigCommerce page (Storefront > Script Manager)
   /store    customer assistant for screens in the store (no login; product links off by default)
   /admin   admin portal (ADMIN_PASSWORD)
   /docs     API documentation
@@ -10,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -40,6 +41,17 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 NO_CACHE = {"Cache-Control": "no-cache"}
 
 
+@app.middleware("http")
+async def frame_policy(request: Request, call_next):
+    """Only the online shop may show /shop in a frame (the chat bubble); no other site may frame any page."""
+    response = await call_next(request)
+    ancestors = "'self'"
+    if request.url.path == "/shop":
+        ancestors += " " + " ".join(settings.shop_embed_origins.split())
+    response.headers.setdefault("Content-Security-Policy", f"frame-ancestors {ancestors}")
+    return response
+
+
 @app.get("/")
 def chat_ui():
     return FileResponse(STATIC / "chat.html", headers=NO_CACHE)
@@ -50,6 +62,12 @@ def chat_ui():
 def customer_ui():
     """Customer assistant; the page reads its channel (online or store) from the path."""
     return FileResponse(STATIC / "assistant.html", headers=NO_CACHE)
+
+
+@app.get("/widget.js")
+def widget():
+    """Chat bubble for the online shop: BigCommerce Script Manager loads it on every storefront page."""
+    return FileResponse(STATIC / "widget.js", media_type="text/javascript", headers={"Cache-Control": "public, max-age=300"})
 
 
 @app.get("/manifest.webmanifest")

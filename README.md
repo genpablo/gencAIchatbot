@@ -9,6 +9,7 @@ shortlist that already passed the safety, stock, expiry and budget rules.
 | --- | --- | --- |
 | `/` | Staff (own login) | Chat assistant, installable on iOS/Android home screens |
 | `/shop` | Online shoppers (no login) | Customer assistant for gencbeauty.com: answers questions, suggests products that link to their shop page |
+| `/widget.js` | gencbeauty.com (BigCommerce Script Manager) | Chat bubble that opens `/shop` on every shop page |
 | `/store` | Shoppers in the store (no login) | The same assistant for an in-store tablet or kiosk; product links off by default |
 | `/admin` | Managers (`ADMIN_PASSWORD`) | Ranking strategy, Excel product import, products & campaigns, staff accounts, analytics |
 | `/docs` | Developers | API documentation |
@@ -145,9 +146,26 @@ on or off per channel. Links use the product's **Product URL** from the import s
 already has this column). If a product has no URL on file, the link is a shop search for its name
 (`https://gencbeauty.com/search.php?search_query=...`); that fallback can be switched off.
 
-**Embed on gencbeauty.com**: paste the iframe snippet shown in that admin tab into a page or the theme footer.
-Inside the frame, product links open in the shop window, not inside the frame. Online, the conversation survives
-page reloads in the same browser tab. In store, nothing is kept for the next shopper.
+**Add it to the BigCommerce shop (gencbeauty.com)** as a chat bubble on every page:
+
+1. The app must be reachable over HTTPS (e.g. the Azure Container Apps URL, section 9). The shop is HTTPS, so
+   browsers block a plain-HTTP frame.
+2. BigCommerce admin > **Storefront > Script Manager > Create a Script**. Placement **Footer**, location **All pages**,
+   category **Functional**, type **Script**, and paste (Admin > Customer assistant shows it with your address):
+   ```html
+   <script src="https://YOUR-APP-ADDRESS/widget.js" defer></script>
+   ```
+   Optional: `data-label="Ask us"` (bubble text) and `data-position="left"`.
+3. Import your product sheet with the **Product URL** column, so "View product" opens each product's page.
+4. If BigCommerce's **Settings > Security & Privacy > Content-Security-Policy** is on, allow the app's address
+   as a script and frame source there.
+
+The bubble opens `/shop?embed=1` in a frame. It loads only when a customer first opens it, and is full screen on
+phones. Product links open in the shop window, and the chat keeps its messages as the customer moves between shop
+pages in the same tab. Only the sites in `SHOP_EMBED_ORIGINS` (default gencbeauty.com, www.gencbeauty.com and
+*.mybigcommerce.com) may frame `/shop`; no other site may frame any page of this app. To give the chat its own
+shop page instead, create a BigCommerce web page and paste the iframe snippet from the admin tab in its HTML editor.
+In store, nothing is kept for the next shopper.
 
 Customer messages are rate-limited per visitor (`PUBLIC_CHAT_PER_MINUTE`, default 8; `PUBLIC_CHAT_PER_HOUR`, default 60),
 because each one may call the AI model. They appear in analytics as event `customer_chat` (CSV export) and in

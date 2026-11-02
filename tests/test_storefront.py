@@ -129,6 +129,27 @@ def test_store_channel_has_no_links_and_settings_apply(client):
 
 
 @DB
+def test_only_the_shop_may_frame_the_online_assistant(client):
+    shop = client.get("/shop").headers["content-security-policy"]
+    assert shop.startswith("frame-ancestors 'self' ") and "https://gencbeauty.com" in shop and "mybigcommerce.com" in shop
+    for path in ("/", "/admin", "/store"):
+        assert client.get(path).headers["content-security-policy"] == "frame-ancestors 'self'"
+    w = client.get("/widget.js")
+    assert w.status_code == 200 and "javascript" in w.headers["content-type"] and "/shop?embed=1" in w.text
+
+
+@DB
+def test_history_follows_the_customer_across_shop_pages(client):
+    conv, m = ask(client, "Which products help with breakouts?")
+    h = client.post("/api/public/history", json={"channel": "online", "conversation": conv})
+    assert h.status_code == 200
+    msgs = h.json()["messages"]
+    assert [x["role"] for x in msgs] == ["user", "assistant"] and msgs[1]["payload"]["products"][0]["url"]
+    assert client.post("/api/public/history", json={"channel": "store", "conversation": conv}).status_code == 404
+    assert client.post("/api/public/history", json={"channel": "online", "conversation": "nope"}).status_code == 404
+
+
+@DB
 def test_customer_chats_stay_out_of_staff_history(client):
     from tests.conftest import staff_login
     ask(client, "What does niacinamide do?")
