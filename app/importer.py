@@ -20,10 +20,13 @@ import json
 import math
 import re
 import threading
+import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+from .config import settings
 from .models import AVOID, CATEGORIES, CONCERNS, ROUTINE_STEP
 from .parsing import CONCERN_KW
 from .providers import Provider, extract_json
@@ -597,15 +600,24 @@ Return ONLY a JSON object with these keys:
   "target_concerns": list from {CONCERNS}
   "avoid_for": list from ["pregnancy"] - only if the text says to avoid it during pregnancy/breastfeeding
   "min_age": integer or null, "max_age": integer or null (only if the text states an age or age group)
-  "key_benefits": 2-3 short selling points a sales assistant can say (max 14 words each, from the text)
-  "ingredients": the ingredient list in order, if the text has one, else []"""
+  "key_benefits": 2-3 short selling points a sales assistant can say (max 14 words each, from the text)"""
+EXTRACT_WITH_INGREDIENTS = EXTRACT_SYSTEM + '\n  "ingredients": the ingredient list in order, if the text has one, else []'
 
 
-def ai_extract(provider: Provider, name: str, description: str) -> dict | None:
+def ai_extract(provider: Provider, name: str, description: str, want_ingredients: bool = True) -> dict | None:
+    """want_ingredients=False when the rules already parsed the list: the AI then gets the text without it and
+    doesn't write it back, which saves most of the tokens (INCI lists are long) and output time."""
+    system = EXTRACT_WITH_INGREDIENTS if want_ingredients else EXTRACT_SYSTEM
     try:
-        return extract_json(provider.chat(EXTRACT_SYSTEM, f"Name: {name}\nDescription:\n{description[:6000]}", role="parse"))
+        return extract_json(provider.chat(system, f"Name: {name}\nDescription:\n{description[:6000]}", role="parse"))
     except Exception:
         return None
+
+
+def _without_ingredient_list(desc: str) -> str:
+    """The description with only the ingredient list cut out (usage notes and cautions after it stay)."""
+    m = _ING_RE.search(desc or "")
+    return (desc[: m.start()] + desc[m.end():]).strip() if m else desc
 
 
 def _list(v, allowed) -> list[str]:
@@ -627,7 +639,10 @@ def extract_attributes(provider: Provider | None, name: str, description: str, c
     """AI + rules, merged safety-first. Returns attributes + ingredient list + flags + review status."""
     regex_ings = parse_ingredients(description)
     rules = rules_extract(name, description, regex_ings)
-    ai = ai_extract(provider, name, description) if (use_ai and provider is not None) else None
+    ai = None
+    if use_ai and provider is not None:
+        ai = (ai_extract(provider, name, _without_ingredient_list(description), want_ingredients=False) if regex_ings
+              else ai_extract(provider, name, description))
     notes = []
 
     if ai:
@@ -737,12 +752,35 @@ def run_job(job_id: int, provider: Provider, actor: str, connect, embed) -> None
         use_ai = load_ranking(conn).use_llm_rerank
         conn.execute("UPDATE import_jobs SET status = 'running', total = %s, done = 0, results = '[]' WHERE id = %s",
                      (len(rows), job_id))
-        results, counts = [], {"created": 0, "updated": 0, "unchanged": 0, "analyzed": 0, "needs_review": 0, "failed": 0}
-        try:
-            for i, r in enumerate(rows, start=1):
-                results.append(_import_row(conn, r, provider, use_ai, opts.get("reanalyze_all", False), counts, actor))
+        results: list[dict | None] = [None] * len(rows)
+        counts = {"created": 0, "updated": 0, "unchanged": 0, "analyzed": 0, "needs_review": 0, "failed": 0}
+        done, last_write = 0, 0.0
+
+        def progress(force: bool = False) -> None:   # rewriting the results JSON every row made big imports slow
+            nonlocal last_write
+            if force or time.monotonic() - last_write > 2:
                 conn.execute("UPDATE import_jobs SET done = %s, results = %s::jsonb, summary = COALESCE(summary, '{}'::jsonb) || %s::jsonb WHERE id = %s",
-                             (i, json.dumps(results), json.dumps({"stage": "analyzing", "counts": counts}), job_id))
+                             (done, json.dumps([x for x in results if x]), json.dumps({"stage": "analyzing", "counts": counts}), job_id))
+                last_write = time.monotonic()
+
+        try:
+            # Rows are saved one by one on this connection; only the AI reading runs in parallel (no DB access).
+            with ThreadPoolExecutor(max(1, settings.import_workers) if use_ai else 1) as pool:
+                futures = {}
+                for i, r in enumerate(rows):
+                    res, todo = _save_row(conn, r, opts.get("reanalyze_all", False), counts, actor)
+                    if todo:
+                        futures[pool.submit(extract_attributes, provider, *todo, use_ai=use_ai)] = (i, res)
+                    else:
+                        results[i] = res
+                        done += 1
+                        progress()
+                for f in as_completed(futures):
+                    i, res = futures[f]
+                    results[i] = _save_reading(conn, res, f, counts)
+                    done += 1
+                    progress()
+            progress(force=True)
             deactivated = 0
             if opts.get("deactivate_missing"):
                 skus = [r["sku"] for r in job["rows"] if r.get("sku")]
@@ -766,7 +804,9 @@ def run_job(job_id: int, provider: Provider, actor: str, connect, embed) -> None
                          (f"{e}\n{traceback.format_exc(limit=3)}", job_id))
 
 
-def _import_row(conn, r: dict, provider, use_ai: bool, reanalyze: bool, counts: dict, actor: str = "import") -> dict:
+def _save_row(conn, r: dict, reanalyze: bool, counts: dict, actor: str = "import") -> tuple[dict, tuple | None]:
+    """Save one row. Returns (result, None) when done, or (result so far, (name, description, category))
+    when the description still has to be read; _save_reading finishes it."""
     sku = r["sku"]
     try:
         old = conn.execute("SELECT p.*, p.price::float AS price_f, p.cost::float AS cost_f, p.margin_pct::float AS margin_f, "
@@ -821,20 +861,28 @@ def _import_row(conn, r: dict, provider, use_ai: bool, reanalyze: bool, counts: 
                    ON CONFLICT (sku) DO UPDATE SET priority = EXCLUDED.priority,
                        updated_by = EXCLUDED.updated_by, updated_at = now()""", (sku, r["priority"], actor))
         counts[action] += 1
-        if not analyse:
-            return {"row": r["row"], "sku": sku, "name": name, "action": action, "analyzed": False}
-        a = extract_attributes(provider, name, desc, r.get("category"), use_ai=use_ai)
-        save_attributes(conn, sku, a)
-        counts["analyzed"] += 1
-        counts["needs_review"] += int(a["needs_review"])
-        return {"row": r["row"], "sku": sku, "name": name, "action": action, "analyzed": True,
-                "category": a["category"], "skin": a["suitable_skin_types"], "concerns": a["target_concerns"],
-                "avoid": a["avoid_for"], "min_age": a["min_age"], "max_age": a["max_age"],
-                "flags": a["flags"], "needs_review": a["needs_review"],
-                "review_note": a["review_note"], "by": a["extracted_by"]}
+        res = {"row": r["row"], "sku": sku, "name": name, "action": action, "analyzed": False}
+        return res, ((name, desc, r.get("category")) if analyse else None)
     except Exception as e:
         counts["failed"] += 1
-        return {"row": r["row"], "sku": sku, "name": r.get("name"), "action": "failed", "error": str(e)[:300]}
+        return {"row": r["row"], "sku": sku, "name": r.get("name"), "action": "failed", "error": str(e)[:300]}, None
+
+
+def _save_reading(conn, res: dict, future, counts: dict) -> dict:
+    """Store what extract_attributes (run in a worker thread) read from one description."""
+    try:
+        a = future.result()
+        save_attributes(conn, res["sku"], a)
+    except Exception as e:
+        counts["failed"] += 1
+        return {**res, "action": "failed", "error": str(e)[:300]}
+    counts["analyzed"] += 1
+    counts["needs_review"] += int(a["needs_review"])
+    return {**res, "analyzed": True,
+            "category": a["category"], "skin": a["suitable_skin_types"], "concerns": a["target_concerns"],
+            "avoid": a["avoid_for"], "min_age": a["min_age"], "max_age": a["max_age"],
+            "flags": a["flags"], "needs_review": a["needs_review"],
+            "review_note": a["review_note"], "by": a["extracted_by"]}
 
 
 def create_preview_job(conn, actor: str, filename: str, parsed: dict) -> dict:

@@ -380,6 +380,7 @@ def product_detail(sku: str, _: str = Depends(require_admin)):
         p = conn.execute(
             """SELECT p.sku, p.name, p.brand, p.category, p.price::float AS price, p.cost::float AS cost, p.stock_qty,
                       COALESCE(p.margin_pct, (p.price - p.cost) / NULLIF(p.price, 0))::float AS margin_pct,
+                      p.margin_pct::float AS margin_direct,
                       p.is_active, p.description, (p.embedding IS NOT NULL AND p.embedded_with = %s) AS searchable,
                       a.suitable_skin_types, a.target_concerns, a.avoid_for, a.min_age, a.max_age, a.texture,
                       a.fragrance_free, a.key_benefits, a.needs_review, a.review_note, a.extracted_by,
@@ -395,6 +396,9 @@ def product_detail(sku: str, _: str = Depends(require_admin)):
                                     "concerns": CONCERNS, "avoid": AVOID}}
 
 
+COMMERCIAL = ("price", "cost", "margin_pct", "stock_qty")   # whitelisted column names for update_attributes
+
+
 class Attributes(BaseModel):
     category: str
     suitable_skin_types: list[str] = []
@@ -405,11 +409,19 @@ class Attributes(BaseModel):
     key_benefits: list[str] = []
     expiry_date: Optional[date] = None
     is_active: bool = True
+    # Commercial fields: only those sent are changed. null clears cost / margin / stock (margin then
+    # falls back to price and cost; stock to "not tracked"). Price can't be cleared.
+    price: Optional[float] = Field(None, ge=0, le=1_000_000)
+    cost: Optional[float] = Field(None, ge=0, le=1_000_000)
+    margin_pct: Optional[float] = Field(None, ge=0, le=1)
+    stock_qty: Optional[int] = Field(None, ge=0)
 
     @model_validator(mode="after")
     def _check(self):
         if self.category not in CATEGORIES:
             raise ValueError("Unknown category")
+        if "price" in self.model_fields_set and self.price is None:
+            raise ValueError("Price can't be empty")
         self.suitable_skin_types = [x for x in self.suitable_skin_types if x in importer.SKIN_ALL]
         self.target_concerns = [x for x in self.target_concerns if x in CONCERNS]
         self.avoid_for = [x for x in self.avoid_for if x in AVOID]
@@ -423,26 +435,45 @@ class Attributes(BaseModel):
 def update_attributes(sku: str, body: Attributes, name: str = Depends(require_admin)):
     from .models import ROUTINE_STEP
     with connect() as conn:
-        old = conn.execute("SELECT p.category, p.is_active, a.suitable_skin_types, a.target_concerns, a.avoid_for, "
-                           "a.min_age, a.max_age, a.key_benefits FROM products p LEFT JOIN product_attributes a "
-                           "USING (sku) WHERE p.sku = %s", (sku,)).fetchone()
+        old = conn.execute("SELECT p.category, p.is_active, p.price::float AS price, p.cost::float AS cost, "
+                           "p.margin_pct::float AS margin_pct, p.stock_qty, a.suitable_skin_types, a.target_concerns, "
+                           "a.avoid_for, a.min_age, a.max_age, a.key_benefits FROM products p "
+                           "LEFT JOIN product_attributes a USING (sku) WHERE p.sku = %s", (sku,)).fetchone()
         if not old:
             raise HTTPException(404, f"Unknown SKU {sku}")
+        commercial = {k: getattr(body, k) for k in COMMERCIAL if k in body.model_fields_set}
+        if commercial:   # not part of the search text, so no re-embedding needed for these
+            conn.execute(f"UPDATE products SET {', '.join(f'{k} = %({k})s' for k in commercial)}, updated_at = now() "
+                         "WHERE sku = %(sku)s", {**commercial, "sku": sku})
         cur = conn.execute("SELECT texture, fragrance_free FROM product_attributes WHERE sku = %s", (sku,)).fetchone() or {}
         importer.save_attributes(conn, sku, {
-            **body.model_dump(exclude={"is_active"}), "routine_step": ROUTINE_STEP[body.category],
+            **body.model_dump(exclude={"is_active", *COMMERCIAL}), "routine_step": ROUTINE_STEP[body.category],
             "texture": cur.get("texture"), "fragrance_free": cur.get("fragrance_free", False),
             "needs_review": False, "review_note": None, "extracted_by": "manual",
             "text_flags": []})               # the editor shows text flags as pre-ticked avoid boxes; staff decide
         conn.execute("UPDATE products SET is_active = %s, expiry_date = %s WHERE sku = %s",
                      (body.is_active, body.expiry_date, sku))
-        audit(conn, name, "product", sku, old, body.model_dump())
+        audit(conn, name, "product", sku, old, body.model_dump(exclude={k for k in COMMERCIAL if k not in commercial}))
     warning = None
     try:
         embed_products(provider=_provider)
     except (ProviderError, EmbedError) as e:
         warning = f"Saved, but the product is not searchable until the model is reachable: {e}"
     return {"ok": True, "warning": warning}
+
+
+@router.delete("/products/{sku}")
+def delete_product(sku: str, name: str = Depends(require_admin)):
+    """Remove a product for good (attributes, ingredient links and business rules go with it).
+    Past recommendation logs keep the SKU; a later import with this SKU creates it again."""
+    with connect() as conn:
+        old = conn.execute("SELECT sku, name, brand, price::float AS price, is_active FROM products WHERE sku = %s",
+                           (sku,)).fetchone()
+        if not old:
+            raise HTTPException(404, f"Unknown SKU {sku}")
+        conn.execute("DELETE FROM products WHERE sku = %s", (sku,))
+        audit(conn, name, "product deleted", sku, old, None)
+    return {"ok": True}
 
 
 @router.post("/embed-missing")

@@ -38,6 +38,7 @@
   h2 { font-size:16px; margin:0 0 4px; } .sub { color:var(--quiet); margin:0 0 16px; font-size:13px; }
   h3 { font-size:14px; margin:20px 0 8px; }
   button.btn { border:1px solid var(--line); background:var(--card); color:var(--ink); padding:7px 14px; border-radius:8px; font:inherit; cursor:pointer; }
+  button.danger { color:var(--bad); border-color:var(--bad); }
   button.primary { background:var(--accent); border-color:var(--accent); color:var(--on-accent); font-family:"Nunito",Arial,sans-serif; font-weight:800; text-transform:uppercase; letter-spacing:.02em; font-size:12.5px; border-radius:5px; }
   .chart rect.bar:hover { opacity:.75; }
   button:disabled { opacity:.5; cursor:default; }
@@ -378,7 +379,8 @@
 <dialog id="dlg">
   <form method="dialog" id="dlgForm">
     <div class="body" id="dlgBody"></div>
-    <div class="foot"><span class="err" id="dlgErr" style="margin:0 auto 0 0"></span>
+    <div class="foot"><button class="btn danger" id="dlgDelete" type="button">Delete product</button>
+      <span class="err" id="dlgErr" style="margin:0 auto 0 0"></span>
       <button class="btn" value="cancel" formnovalidate>Close</button>
       <button class="btn primary" id="dlgSave" value="default">Save</button></div>
   </form>
@@ -697,6 +699,14 @@ async function openDetail(sku) {
     <h3>Description (from the Excel file)</h3><div class="desc">${esc(p.description)}</div>
     <h3>Ingredients and safety flags</h3>
     <div class="note">${(p.ingredients || []).length ? p.ingredients.map(i => esc(i.inci_name) + (i.flags.length ? ` <span class="tag bad">${esc(i.flags.join(", "))}</span>` : "")).join(", ") : "No ingredient list found. Allergy filters cannot check this product; add \"Ingredients: ...\" to the description."}</div>
+    <h3>Price and stock</h3>
+    <div class="formgrid">
+      <b>Price (${esc(CURRENCY)})</b><input type="number" name="price" min="0" step="0.01" required value="${p.price ?? ""}" style="width:120px">
+      <b>Cost (${esc(CURRENCY)})</b><div><input type="number" name="cost" min="0" step="0.01" value="${p.cost ?? ""}" style="width:120px"> <span class="note">Empty = unknown</span></div>
+      <b>Margin (%)</b><div><input type="number" name="margin" min="0" max="100" step="0.1" value="${p.margin_direct != null ? +(p.margin_direct * 100).toFixed(2) : ""}" style="width:120px">
+        <span class="note">Empty = calculated from price and cost${p.margin_direct == null && p.margin_pct != null ? ` (now ${pct(p.margin_pct, 1)})` : ""}</span></div>
+      <b>Stock</b><div><input type="number" name="stock" min="0" step="1" value="${p.stock_qty ?? ""}" style="width:120px"> <span class="note">Empty = not tracked (treated as in stock); 0 = out of stock</span></div>
+    </div>
     <h3>What the recommender uses (edit if the AI got it wrong)</h3>
     <div class="formgrid">
       <b>Category</b><select name="category">${v.categories.map(c => `<option ${c === p.category ? "selected" : ""}>${c}</option>`).join("")}</select>
@@ -717,12 +727,23 @@ $("#dlgSave").onclick = async e => {
   const body = {category: f.querySelector('[name="category"]').value, suitable_skin_types: all("skin"), target_concerns: all("concern"),
     avoid_for: all("avoid"), min_age: num("min_age") ? +num("min_age") : null, max_age: num("max_age") ? +num("max_age") : null,
     key_benefits: f.querySelector('[name="benefits"]').value.split("\n"), is_active: f.querySelector('[name="active"]').checked,
-    expiry_date: f.querySelector('[name="expiry"]').value || null};
+    expiry_date: f.querySelector('[name="expiry"]').value || null,
+    price: num("price") === "" ? null : +num("price"), cost: num("cost") === "" ? null : +num("cost"),
+    margin_pct: num("margin") === "" ? null : +num("margin") / 100, stock_qty: num("stock") === "" ? null : +num("stock")};
+  if (!f.reportValidity()) return;
   try {
     const r = await api("/products/" + encodeURIComponent(DETAIL.product.sku) + "/attributes", {method:"PUT", body: JSON.stringify(body)});
     if (r.warning) { $("#dlgErr").textContent = r.warning; } else { $("#dlg").close(); }
     loadProducts();
   } catch (err) { $("#dlgErr").textContent = err.message; }
+};
+
+$("#dlgDelete").onclick = async () => {
+  const p = DETAIL.product;
+  if (!confirm(`Delete "${p.name}" (${p.sku})?\n\nIt is removed for good. Importing a file with this SKU adds it again. ` +
+               `To stop recommending it but keep it, untick Active instead.`)) return;
+  try { await api("/products/" + encodeURIComponent(p.sku), {method: "DELETE"}); $("#dlg").close(); loadProducts(); }
+  catch (err) { $("#dlgErr").textContent = err.message; }
 };
 
 /* ---------------- Import ---------------- */
