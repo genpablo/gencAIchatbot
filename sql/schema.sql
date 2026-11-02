@@ -219,3 +219,6 @@ ALTER TABLE chat_conversations ALTER COLUMN user_id DROP NOT NULL;          -- N
 ALTER TABLE chat_conversations ADD COLUMN IF NOT EXISTS channel TEXT NOT NULL DEFAULT 'staff';  -- staff | online | store
 ALTER TABLE chat_conversations ADD COLUMN IF NOT EXISTS access_token TEXT;  -- customer's random conversation key
 CREATE UNIQUE INDEX IF NOT EXISTS chat_conversations_token ON chat_conversations (access_token);
+
+-- v0.7: product photos on the customer assistant cards (safe to re-run)
+ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url TEXT;               -- main photo on the shop's image CDN

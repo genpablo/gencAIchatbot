@@ -221,12 +221,12 @@ _schema_ok = False
 
 
 def _require_schema(conn) -> None:
-    """Customer conversations need the v0.6 columns; say how to add them instead of failing on every message."""
+    """Customer conversations need the v0.6 and v0.7 columns; say how to add them instead of failing on every message."""
     global _schema_ok
     if not _schema_ok:
-        _schema_ok = bool(conn.execute(
-            """SELECT 1 FROM information_schema.columns WHERE table_name = 'chat_conversations'
-                   AND column_name = 'access_token'""").fetchone())
+        _schema_ok = conn.execute(
+            """SELECT count(*) AS n FROM information_schema.columns WHERE (table_name, column_name)
+                   IN (('chat_conversations', 'access_token'), ('products', 'image_url'))""").fetchone()["n"] == 2
     if not _schema_ok:
         log.error("customer assistant: database not upgraded; run `python -m app.ingest --init`")
         raise HTTPException(503, "The assistant is being set up. Please try again later.")

@@ -20,10 +20,13 @@ import json
 import math
 import re
 import threading
+import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+from .config import settings
 from .models import AVOID, CATEGORIES, CONCERNS, ROUTINE_STEP
 from .parsing import CONCERN_KW
 from .providers import Provider, extract_json
@@ -48,6 +51,7 @@ COLUMNS = {   # canonical -> accepted header spellings (lower-case, spaces/under
                     "bestbefore", "bestbeforedate", "bbd", "useby", "usebydate"],
     "ingredients": ["ingredients", "ingredientlist", "inci", "incilist", "fullingredients", "composition"],
     "url":         ["producturl", "url", "link", "productlink", "productpage", "pageurl", "weburl", "shopurl", "website"],
+    "image":       ["imageurl", "image", "imagelink", "photo", "photourl", "picture", "pictureurl", "productimage", "img"],
 }
 REQUIRED = ["sku"]                                   # the only column a file must have (e.g. a price-update sheet)
 NEW_PRODUCT_NEEDS = ["name", "price"]               # a NEW product also needs these; description is strongly advised
@@ -346,6 +350,9 @@ def read_table(filename: str, data: bytes, date_order: str = "MDY") -> dict:
         url = _url(get("url"))
         if not blank(get("url")) and url is None:
             warns.append(f"Product URL {get('url')!r} must start with http:// or https://; ignored")
+        image = _url(get("image"))
+        if not blank(get("image")) and image is None:
+            warns.append(f"Image URL {get('image')!r} must start with http:// or https://; ignored")
         description = _text(get("description"))
         ing_col = _text(get("ingredients"))
         if description and len(description) > 8000:
@@ -355,7 +362,7 @@ def read_table(filename: str, data: bytes, date_order: str = "MDY") -> dict:
                "margin_pct": margin,
                "priority": priority,
                "stock": stock, "brand": _text(get("brand")), "category": category, "active": active,
-               "description": description, "ingredients_text": ing_col, "url": url,
+               "description": description, "ingredients_text": ing_col, "url": url, "image": image,
                "expiry": expiry.isoformat() if expiry else None}
 
         if not row["sku"]:
@@ -429,7 +436,7 @@ def desc_hash(name: str, description: str) -> str:
 def diff_rows(conn, rows: list[dict]) -> dict:
     db = {r["sku"]: r for r in conn.execute(
         "SELECT p.sku, p.name, p.price::float AS price, p.cost::float AS cost, p.margin_pct::float AS margin_pct, p.stock_qty, p.brand, p.category, "
-        "p.is_active, p.description, p.description_hash, p.expiry_date, p.product_url, COALESCE(br.priority, 3) AS priority, "
+        "p.is_active, p.description, p.description_hash, p.expiry_date, p.product_url, p.image_url, COALESCE(br.priority, 3) AS priority, "
         "a.sku IS NOT NULL AS has_attrs FROM products p "
         "LEFT JOIN product_attributes a USING (sku) LEFT JOIN business_rules br USING (sku)").fetchall()}
     new, changed, unchanged = [], [], []
@@ -467,6 +474,8 @@ def diff_rows(conn, rows: list[dict]) -> dict:
             fields.append(f"expiry → {r['expiry']}")
         if r.get("url") and old["product_url"] != r["url"]:
             fields.append("product URL")
+        if r.get("image") and old["image_url"] != r["image"]:
+            fields.append("image")
         (changed if fields else unchanged).append(
             {"row": r["row"], "sku": r["sku"], "name": name, "changes": fields})
     in_file = {r["sku"] for r in rows if r["sku"]}
@@ -597,15 +606,24 @@ Return ONLY a JSON object with these keys:
   "target_concerns": list from {CONCERNS}
   "avoid_for": list from ["pregnancy"] - only if the text says to avoid it during pregnancy/breastfeeding
   "min_age": integer or null, "max_age": integer or null (only if the text states an age or age group)
-  "key_benefits": 2-3 short selling points a sales assistant can say (max 14 words each, from the text)
-  "ingredients": the ingredient list in order, if the text has one, else []"""
+  "key_benefits": 2-3 short selling points a sales assistant can say (max 14 words each, from the text)"""
+EXTRACT_WITH_INGREDIENTS = EXTRACT_SYSTEM + '\n  "ingredients": the ingredient list in order, if the text has one, else []'
 
 
-def ai_extract(provider: Provider, name: str, description: str) -> dict | None:
+def ai_extract(provider: Provider, name: str, description: str, want_ingredients: bool = True) -> dict | None:
+    """want_ingredients=False when the rules already parsed the list: the AI then gets the text without it and
+    doesn't write it back, which saves most of the tokens (INCI lists are long) and output time."""
+    system = EXTRACT_WITH_INGREDIENTS if want_ingredients else EXTRACT_SYSTEM
     try:
-        return extract_json(provider.chat(EXTRACT_SYSTEM, f"Name: {name}\nDescription:\n{description[:6000]}", role="parse"))
+        return extract_json(provider.chat(system, f"Name: {name}\nDescription:\n{description[:6000]}", role="parse"))
     except Exception:
         return None
+
+
+def _without_ingredient_list(desc: str) -> str:
+    """The description with only the ingredient list cut out (usage notes and cautions after it stay)."""
+    m = _ING_RE.search(desc or "")
+    return (desc[: m.start()] + desc[m.end():]).strip() if m else desc
 
 
 def _list(v, allowed) -> list[str]:
@@ -627,7 +645,10 @@ def extract_attributes(provider: Provider | None, name: str, description: str, c
     """AI + rules, merged safety-first. Returns attributes + ingredient list + flags + review status."""
     regex_ings = parse_ingredients(description)
     rules = rules_extract(name, description, regex_ings)
-    ai = ai_extract(provider, name, description) if (use_ai and provider is not None) else None
+    ai = None
+    if use_ai and provider is not None:
+        ai = (ai_extract(provider, name, _without_ingredient_list(description), want_ingredients=False) if regex_ings
+              else ai_extract(provider, name, description))
     notes = []
 
     if ai:
@@ -737,12 +758,35 @@ def run_job(job_id: int, provider: Provider, actor: str, connect, embed) -> None
         use_ai = load_ranking(conn).use_llm_rerank
         conn.execute("UPDATE import_jobs SET status = 'running', total = %s, done = 0, results = '[]' WHERE id = %s",
                      (len(rows), job_id))
-        results, counts = [], {"created": 0, "updated": 0, "unchanged": 0, "analyzed": 0, "needs_review": 0, "failed": 0}
-        try:
-            for i, r in enumerate(rows, start=1):
-                results.append(_import_row(conn, r, provider, use_ai, opts.get("reanalyze_all", False), counts, actor))
+        results: list[dict | None] = [None] * len(rows)
+        counts = {"created": 0, "updated": 0, "unchanged": 0, "analyzed": 0, "needs_review": 0, "failed": 0}
+        done, last_write = 0, 0.0
+
+        def progress(force: bool = False) -> None:   # rewriting the results JSON every row made big imports slow
+            nonlocal last_write
+            if force or time.monotonic() - last_write > 2:
                 conn.execute("UPDATE import_jobs SET done = %s, results = %s::jsonb, summary = COALESCE(summary, '{}'::jsonb) || %s::jsonb WHERE id = %s",
-                             (i, json.dumps(results), json.dumps({"stage": "analyzing", "counts": counts}), job_id))
+                             (done, json.dumps([x for x in results if x]), json.dumps({"stage": "analyzing", "counts": counts}), job_id))
+                last_write = time.monotonic()
+
+        try:
+            # Rows are saved one by one on this connection; only the AI reading runs in parallel (no DB access).
+            with ThreadPoolExecutor(max(1, settings.import_workers) if use_ai else 1) as pool:
+                futures = {}
+                for i, r in enumerate(rows):
+                    res, todo = _save_row(conn, r, opts.get("reanalyze_all", False), counts, actor)
+                    if todo:
+                        futures[pool.submit(extract_attributes, provider, *todo, use_ai=use_ai)] = (i, res)
+                    else:
+                        results[i] = res
+                        done += 1
+                        progress()
+                for f in as_completed(futures):
+                    i, res = futures[f]
+                    results[i] = _save_reading(conn, res, f, counts)
+                    done += 1
+                    progress()
+            progress(force=True)
             deactivated = 0
             if opts.get("deactivate_missing"):
                 skus = [r["sku"] for r in job["rows"] if r.get("sku")]
@@ -766,7 +810,9 @@ def run_job(job_id: int, provider: Provider, actor: str, connect, embed) -> None
                          (f"{e}\n{traceback.format_exc(limit=3)}", job_id))
 
 
-def _import_row(conn, r: dict, provider, use_ai: bool, reanalyze: bool, counts: dict, actor: str = "import") -> dict:
+def _save_row(conn, r: dict, reanalyze: bool, counts: dict, actor: str = "import") -> tuple[dict, tuple | None]:
+    """Save one row. Returns (result, None) when done, or (result so far, (name, description, category))
+    when the description still has to be read; _save_reading finishes it."""
     sku = r["sku"]
     try:
         old = conn.execute("SELECT p.*, p.price::float AS price_f, p.cost::float AS cost_f, p.margin_pct::float AS margin_f, "
@@ -783,10 +829,10 @@ def _import_row(conn, r: dict, provider, use_ai: bool, reanalyze: bool, counts: 
             cat = r.get("category") or "other"
             conn.execute(
                 """INSERT INTO products (sku, name, brand, category, routine_step, price, cost, margin_pct, stock_qty, is_active,
-                                         description, description_hash, expiry_date, product_url)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                                         description, description_hash, expiry_date, product_url, image_url)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (sku, name, r.get("brand"), cat, ROUTINE_STEP[cat], r["price"], r.get("cost"), r.get("margin_pct"), r.get("stock"),
-                 True if r.get("active") is None else r["active"], desc, h, r.get("expiry"), r.get("url")))
+                 True if r.get("active") is None else r["active"], desc, h, r.get("expiry"), r.get("url"), r.get("image")))
             action, analyse = "created", True
         else:
             name = r.get("name") or old["name"]                          # empty cell -> keep what is on file
@@ -802,14 +848,15 @@ def _import_row(conn, r: dict, provider, use_ai: bool, reanalyze: bool, counts: 
                        or (r.get("active") is not None and old["is_active"] != r["active"])
                        or (r.get("category") and old["category"] != r["category"])
                        or (r.get("expiry") and str(old["expiry_date"]) != r["expiry"])
-                       or (r.get("url") and old["product_url"] != r["url"]))
+                       or (r.get("url") and old["product_url"] != r["url"])
+                       or (r.get("image") and old["image_url"] != r["image"]))
             conn.execute(
                 """UPDATE products SET name = %s, price = %s, description = %s, description_hash = %s,
                        brand = COALESCE(%s, brand), cost = COALESCE(%s, cost), margin_pct = COALESCE(%s, margin_pct), stock_qty = COALESCE(%s, stock_qty),
                        is_active = COALESCE(%s, is_active), expiry_date = COALESCE(%s::date, expiry_date),
-                       product_url = COALESCE(%s, product_url), updated_at = now() WHERE sku = %s""",
+                       product_url = COALESCE(%s, product_url), image_url = COALESCE(%s, image_url), updated_at = now() WHERE sku = %s""",
                 (name, price, desc, h, r.get("brand"), r.get("cost"), r.get("margin_pct"), r.get("stock"), r.get("active"), r.get("expiry"),
-                 r.get("url"), sku))
+                 r.get("url"), r.get("image"), sku))
             action = "updated" if changed else "unchanged"
             analyse = (reanalyze or not old["has_attrs"] or old["description_hash"] != h
                        or bool(r.get("category") and r["category"] != old["category"]))
@@ -821,20 +868,28 @@ def _import_row(conn, r: dict, provider, use_ai: bool, reanalyze: bool, counts: 
                    ON CONFLICT (sku) DO UPDATE SET priority = EXCLUDED.priority,
                        updated_by = EXCLUDED.updated_by, updated_at = now()""", (sku, r["priority"], actor))
         counts[action] += 1
-        if not analyse:
-            return {"row": r["row"], "sku": sku, "name": name, "action": action, "analyzed": False}
-        a = extract_attributes(provider, name, desc, r.get("category"), use_ai=use_ai)
-        save_attributes(conn, sku, a)
-        counts["analyzed"] += 1
-        counts["needs_review"] += int(a["needs_review"])
-        return {"row": r["row"], "sku": sku, "name": name, "action": action, "analyzed": True,
-                "category": a["category"], "skin": a["suitable_skin_types"], "concerns": a["target_concerns"],
-                "avoid": a["avoid_for"], "min_age": a["min_age"], "max_age": a["max_age"],
-                "flags": a["flags"], "needs_review": a["needs_review"],
-                "review_note": a["review_note"], "by": a["extracted_by"]}
+        res = {"row": r["row"], "sku": sku, "name": name, "action": action, "analyzed": False}
+        return res, ((name, desc, r.get("category")) if analyse else None)
     except Exception as e:
         counts["failed"] += 1
-        return {"row": r["row"], "sku": sku, "name": r.get("name"), "action": "failed", "error": str(e)[:300]}
+        return {"row": r["row"], "sku": sku, "name": r.get("name"), "action": "failed", "error": str(e)[:300]}, None
+
+
+def _save_reading(conn, res: dict, future, counts: dict) -> dict:
+    """Store what extract_attributes (run in a worker thread) read from one description."""
+    try:
+        a = future.result()
+        save_attributes(conn, res["sku"], a)
+    except Exception as e:
+        counts["failed"] += 1
+        return {**res, "action": "failed", "error": str(e)[:300]}
+    counts["analyzed"] += 1
+    counts["needs_review"] += int(a["needs_review"])
+    return {**res, "analyzed": True,
+            "category": a["category"], "skin": a["suitable_skin_types"], "concerns": a["target_concerns"],
+            "avoid": a["avoid_for"], "min_age": a["min_age"], "max_age": a["max_age"],
+            "flags": a["flags"], "needs_review": a["needs_review"],
+            "review_note": a["review_note"], "by": a["extracted_by"]}
 
 
 def create_preview_job(conn, actor: str, filename: str, parsed: dict) -> dict:
@@ -858,20 +913,21 @@ def template_xlsx() -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = "Products"
-    headers = ["SKU", "Name", "Price", "Description", "Margin (%)", "Priority", "Cost", "Stock", "Brand", "Category", "Active", "Expiry", "Ingredients", "Product URL"]
+    headers = ["SKU", "Name", "Price", "Description", "Margin (%)", "Priority", "Cost", "Stock", "Brand", "Category", "Active", "Expiry", "Ingredients", "Product URL", "Image URL"]
     ws.append(headers)
     ws.append(["SR-101", "Cica Calming Serum", 24.00,
                "A lightweight serum that calms redness and irritation and helps with breakouts. "
                "Suitable for sensitive, oily and combination skin, ages 18 and over. Fragrance-free.\n"
                "Ingredients: Water, Centella Asiatica Extract, Glycerin, Niacinamide, Panthenol, Madecassoside",
                0.70, 5, 7.20, 120, "Sample", "serum", "yes", "2027-06-30", "",
-               "https://gencbeauty.com/cica-calming-serum/"])
+               "https://gencbeauty.com/cica-calming-serum/",
+               "https://cdn11.bigcommerce.com/s-kzkmuqjqk9/products/101/images/201/cica-calming-serum.jpg"])
     ws.append(["CR-205", "Ginseng Firming Night Cream", 52.00,
                "Rich night cream for mature, dry skin (40+) that softens fine lines and improves firmness. "
                "Not recommended during pregnancy.\n"
                "Ingredients: Water, Ginseng Root Extract, Shea Butter, Retinol, Adenosine, Fragrance",
-               0.78, 3, 11.50, 25, "Sample", "", "yes", "", "", ""])
-    for i, w in enumerate([12, 30, 10, 90, 14, 12, 10, 9, 14, 14, 9, 13, 50, 40], start=1):
+               0.78, 3, 11.50, 25, "Sample", "", "yes", "", "", "", ""])
+    for i, w in enumerate([12, 30, 10, 90, 14, 12, 10, 9, 14, 14, 9, 13, 50, 40, 40], start=1):
         ws.column_dimensions[chr(64 + i)].width = w
     req = PatternFill("solid", fgColor="F9D5E1")
     opt = PatternFill("solid", fgColor="EEEEEE")
@@ -903,7 +959,8 @@ def template_xlsx() -> bytes:
         ("Required (pink): SKU, Name, Price, Description.", False),
         ("Optional (grey): Margin (%), Priority (1-5), Cost (fallback when Margin is unknown), Stock (empty = always available), Brand, Category, Active (yes/no),", False),
         ("  Expiry (e.g. 2027-06-30 or 06/2027; empty = not tracked), Ingredients (if not already in the description),", False),
-        ("  Product URL (the product's page on the online shop; the online customer assistant links to it).", False),
+        ("  Product URL (the product's page on the online shop; the online customer assistant links to it),", False),
+        ("  Image URL (the product's photo, e.g. its image link on the shop; shown on the customer assistant's cards).", False),
         ("", False),
         ("Empty cells are fine:", True),
         ("- Leave a cell empty (or write N/A) if you don't know the value. For a product that already exists, an empty cell keeps the current value.", False),

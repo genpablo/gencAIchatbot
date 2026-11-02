@@ -156,7 +156,8 @@ already has this column). If a product has no URL on file, the link is a shop se
    <script src="https://YOUR-APP-ADDRESS/widget.js" defer></script>
    ```
    Optional: `data-label="Ask us"` (bubble text) and `data-position="left"`.
-3. Import your product sheet with the **Product URL** column, so "View product" opens each product's page.
+3. Import your product sheet with the **Product URL** column, so "View product" opens each product's page, and the
+   **Image URL** column for a photo on each card (a missing or broken link just shows no photo).
 4. If BigCommerce's **Settings > Security & Privacy > Content-Security-Policy** is on, allow the app's address
    as a script and frame source there.
 
@@ -188,7 +189,7 @@ Every change is logged with the manager's name and time. Put the service behind 
 1. **Fill the sheet.** Only **SKU** is required as a column. A new product needs **SKU, Name, Price**
    (a Description is strongly advised). Add **Margin (%)** and **Priority** for business ranking.
    Optional: Cost (margin fallback for older catalogs), Stock, Brand, Category, Active,
-   **Expiry**, **Ingredients**, **Product URL** (its page on the online shop). Column names can vary ("Product Code", "Retail Price", "Details", "Best
+   **Expiry**, **Ingredients**, **Product URL** (its page on the online shop), **Image URL** (its photo). Column names can vary ("Product Code", "Retail Price", "Details", "Best
    before", "INCI" all work). *Download Excel template* gives a sheet with instructions;
    `samples/sample_products.xlsx` is an example.
 2. **Write good descriptions**: what it does, who it is for (skin types, age), who should avoid it, and the

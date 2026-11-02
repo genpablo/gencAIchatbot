@@ -178,6 +178,26 @@ def test_ai_reading_is_merged_safety_first():
     assert a["ingredients"] == ["Water", "Retinol", "Squalane", "Fragrance"]   # list taken from the text, not the AI
 
 
+class RecordingLLM(FakeLLM):
+    def __init__(self, reply): super().__init__(reply); self.calls = []
+    def chat(self, system, user, role="rank"): self.calls.append((system, user)); return self.reply
+
+
+def test_ai_skips_an_ingredient_list_the_rules_already_read():
+    ai = RecordingLLM('{"category":"toner","suitable_skin_types":["oily"],"target_concerns":[],"key_benefits":[]}')
+    desc = ("Toner for oily skin.\nIngredients: Water, Salicylic Acid, Glycerin\n\n"
+            "Caution: avoid during pregnancy.")
+    a = extract_attributes(ai, "Clear Toner", desc)
+    system, user = ai.calls[0]
+    assert '"ingredients"' not in system and "Salicylic Acid" not in user     # list neither sent nor asked back
+    assert "avoid during pregnancy" in user                                    # text after the list still reaches the AI
+    assert a["ingredients"] == ["Water", "Salicylic Acid", "Glycerin"] and "bha" in a["flags"]
+    ai2 = RecordingLLM('{"category":"cream","ingredients":["Water","Shea Butter"]}')
+    b = extract_attributes(ai2, "Shea Cream", "Rich cream. Contains water and shea butter.")
+    assert '"ingredients"' in ai2.calls[0][0]                                  # no parsable list: the AI is asked for it
+    assert b["ingredients"] == ["Water", "Shea Butter"]
+
+
 def test_rules_only_when_ai_fails_and_review_flag():
     a = extract_attributes(FakeLLM("sorry"), "Mystery Product", "Nice product for everyone.")
     assert a["extracted_by"] == "rules" and a["needs_review"]
@@ -284,6 +304,33 @@ def test_manual_edit_of_ai_reading(client):
     assert p["searchable"] is True
     bad = client.put("/admin/api/products/NW-003/attributes", json={**body, "min_age": 50, "max_age": 20})
     assert bad.status_code == 422
+
+
+@pytestmark_db
+def test_manual_edit_of_price_cost_margin_stock(client):
+    body = {"category": "serum", "suitable_skin_types": ["oily"], "target_concerns": ["acne"], "is_active": True}
+    r = client.put("/admin/api/products/NW-003/attributes",
+                   json={**body, "price": 31.5, "cost": 12, "margin_pct": 0.55, "stock_qty": 7})
+    assert r.status_code == 200
+    p = client.get("/admin/api/products/NW-003").json()["product"]
+    assert (p["price"], p["cost"], p["margin_direct"], p["stock_qty"]) == (31.5, 12, 0.55, 7)
+    client.put("/admin/api/products/NW-003/attributes", json={**body, "margin_pct": None, "stock_qty": None})
+    p = client.get("/admin/api/products/NW-003").json()["product"]
+    assert p["margin_direct"] is None and abs(p["margin_pct"] - (31.5 - 12) / 31.5) < 1e-6    # falls back to price/cost
+    assert p["stock_qty"] is None and p["price"] == 31.5                                       # unsent price kept
+    for bad in ({"price": None}, {"price": -1}, {"margin_pct": 1.5}, {"stock_qty": -2}):
+        assert client.put("/admin/api/products/NW-003/attributes", json={**body, **bad}).status_code == 422
+
+
+@pytestmark_db
+def test_delete_product(client):
+    upload_and_run(client, xlsx(NEW))
+    assert client.delete("/admin/api/products/NW-002").status_code == 200
+    assert client.get("/admin/api/products/NW-002").status_code == 404
+    assert "NW-002" not in {p["sku"] for p in client.get("/admin/api/products").json()["products"]}
+    assert client.delete("/admin/api/products/NW-002").status_code == 404
+    upload_and_run(client, xlsx(NEW))                                         # re-import brings it back
+    assert client.get("/admin/api/products/NW-002").status_code == 200
 
 
 @pytestmark_db

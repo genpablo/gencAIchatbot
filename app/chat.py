@@ -197,7 +197,7 @@ def match_products(conn, message: str, limit: int = 3) -> list[str]:
 def product_facts(conn, skus: list[str]) -> list[dict]:
     rows = conn.execute(
         """SELECT p.sku, p.name, p.brand, p.category, p.price::float AS price, p.stock_qty, p.expiry_date, p.description,
-                  p.product_url,
+                  p.product_url, p.image_url,
                   a.suitable_skin_types, a.target_concerns, a.avoid_for, COALESCE(a.text_flags, '{}') AS text_flags,
                   a.min_age, a.max_age, a.key_benefits,
                   (SELECT array_agg(i.inci_name ORDER BY pi.position) FROM product_ingredients pi
@@ -225,7 +225,7 @@ def product_card(r: dict) -> dict:
             "ages": _ages(r) or None, "key_benefits": (r.get("key_benefits") or [])[:3],
             "key_ingredients": (r.get("ingredients") or [])[:6], "flags": flags, "notes": notes,
             "skin_types": r.get("suitable_skin_types") or [], "concerns": r.get("target_concerns") or [],
-            "product_url": r.get("product_url")}
+            "product_url": r.get("product_url"), "image_url": r.get("image_url")}
 
 
 QA_SYSTEM = """You help a K-beauty store employee answer a question about specific products.

@@ -50,6 +50,14 @@ def test_import_reads_product_urls():
     assert any("Product URL" in i["message"] for i in p["issues"])
 
 
+def test_import_reads_image_urls():
+    img = "https://cdn11.bigcommerce.com/s-x/products/1/images/2/serum.jpg"
+    p = read_table("p.xlsx", xlsx([("A-1", "Serum", 10, img), ("A-2", "Toner", 9, "serum.jpg"), ("A-3", "Cream", 8, "")],
+                                  headers=("SKU", "Name", "Price", "Image URL")))
+    assert [r["image"] for r in p["rows"]] == [img, None, None]
+    assert [i["message"] for i in p["issues"] if "Image URL" in i["message"]] and len(p["issues"]) == 1
+
+
 def test_rate_limit(monkeypatch):
     import dataclasses
     monkeypatch.setattr(storefront, "settings", dataclasses.replace(storefront.settings, public_chat_per_minute=2))
@@ -74,6 +82,7 @@ def client():
     with db.connect() as c:
         c.execute("DELETE FROM app_settings WHERE key = 'customer_assistant'")
         c.execute("UPDATE products SET product_url = 'https://gencbeauty.com/cica-repair-ampoule/' WHERE sku = 'SR-004'")
+        c.execute("UPDATE products SET image_url = 'https://cdn11.bigcommerce.com/s-x/products/4/images/9/cica.jpg' WHERE sku = 'SR-004'")
     ingest.embed_products(reembed=True)
     storefront._hits.clear()
     return TestClient(app)
@@ -101,6 +110,8 @@ def test_online_customer_gets_answers_and_product_links(client):
     conv, m = ask(client, "Is the Cica Repair Ampoule good for redness?", conv=conv)
     cica = next(c for c in m["payload"]["products"] if c["sku"] == "SR-004")
     assert cica["url"] == "https://gencbeauty.com/cica-repair-ampoule/"
+    assert cica["image_url"] == "https://cdn11.bigcommerce.com/s-x/products/4/images/9/cica.jpg"
+    assert all(c["image_url"] is None for c in m["payload"]["products"] if c["sku"] != "SR-004")   # no photo on file
     # the conversation remembers the customer: pregnancy-unsafe products are never suggested afterwards
     conv, m = ask(client, "I'm pregnant. Which serum would help with fine lines?", conv=conv)
     assert "SR-003" not in [c["sku"] for c in m["payload"]["products"]]
