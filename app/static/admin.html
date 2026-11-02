@@ -295,6 +295,17 @@
       <label><input type="checkbox" id="asSearch"> No product URL on file: link to a shop search for the product name</label>
     </div>
     <p class="note" id="asUrls"></p>
+    <h3>Suggestion chips</h3>
+    <p class="note">The quick-reply buttons under the chat, on both /shop and /store. One chip per line, up to 8 per list and
+      60 characters each. Tapping a chip sends its text as the customer's message.</p>
+    <div class="grid2">
+      <label class="tile" style="display:block"><b>Before the customer describes their skin</b>
+        <textarea id="asStarters" rows="6" style="margin-top:8px"></textarea></label>
+      <label class="tile" style="display:block"><b>After an answer</b>
+        <textarea id="asFollowUps" rows="6" style="margin-top:8px"></textarea>
+        <span class="note">"Start over" is always added last. Chips mentioning "cheaper" only show once products are suggested;
+          ones mentioning sensitive skin or fragrance are hidden once the customer has said so.</span></label>
+    </div>
     <div class="row" style="margin-top:20px">
       <button class="btn primary" id="saveAssistant" disabled>Save</button>
       <button class="btn" id="resetAssistant" disabled>Discard changes</button>
@@ -658,7 +669,7 @@ let AS_SAVED = null, AS = null;
 const AS_FIELDS = [["#asOnline", "online_enabled"], ["#asOnlineLinks", "online_links"], ["#asStore", "store_enabled"],
                    ["#asStoreLinks", "store_links"], ["#asSearch", "search_fallback"]];
 async function loadAssistant() {
-  const d = await api("/assistant"); AS_SAVED = d.settings; AS = {...AS_SAVED};
+  const d = await api("/assistant"); AS_SAVED = d.settings; AS = {...AS_SAVED}; fillChips();
   $("#assistantMeta").textContent = d.updated_by ? `Last saved by ${d.updated_by}, ${when(d.updated_at)}` : "Using the defaults. Not saved yet.";
   const use = u => u ? `Last 30 days: ${u.chats} chats, ${u.messages} messages${u.errors ? `, ${u.errors} errors` : ""}.` : "Not used in the last 30 days.";
   $("#asOnlineUse").textContent = use(d.usage.online); $("#asStoreUse").textContent = use(d.usage.store);
@@ -679,7 +690,11 @@ function renderAssistant() {
 }
 AS_FIELDS.forEach(([sel, k]) => { $(sel).onchange = e => { AS[k] = e.target.checked; renderAssistant(); }; });
 $("#asShop").oninput = e => { AS.shop_url = e.target.value.trim(); renderAssistant(); };
-$("#resetAssistant").onclick = () => { AS = {...AS_SAVED}; renderAssistant(); };
+const chipLines = el => el.value.split("\n").map(c => c.trim()).filter(Boolean);
+function fillChips() { $("#asStarters").value = AS.starters.join("\n"); $("#asFollowUps").value = AS.follow_ups.join("\n"); }
+$("#asStarters").oninput = e => { AS.starters = chipLines(e.target); renderAssistant(); };
+$("#asFollowUps").oninput = e => { AS.follow_ups = chipLines(e.target); renderAssistant(); };
+$("#resetAssistant").onclick = () => { AS = {...AS_SAVED}; fillChips(); renderAssistant(); };
 $("#saveAssistant").onclick = async () => {
   try { await api("/assistant", {method:"PUT", body: JSON.stringify(AS)}); await loadAssistant(); }
   catch (e) { $("#assistantMeta").textContent = "Error: " + e.message; }

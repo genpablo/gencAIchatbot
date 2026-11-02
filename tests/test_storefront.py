@@ -37,6 +37,23 @@ def test_shop_url_is_checked_and_trimmed():
         AssistantSettings(shop_url="javascript:alert(1)")
 
 
+def test_chips_are_editable_and_checked():
+    from app.models import CustomerProfile
+    s = AssistantSettings()
+    assert s.starters == storefront.STARTERS and s.follow_ups == storefront.FOLLOW_UPS   # defaults = the old chips
+    s = AssistantSettings(starters=["  Dry   skin ", "dry skin", "", "Start over", "Acne help"],
+                          follow_ups=["Show me something cheaper", "Only for sensitive skin", "Any toners?"])
+    assert s.starters == ["Dry skin", "Acne help"]                 # trimmed, de-duplicated, Start over is built in
+    new, talked = CustomerProfile(), CustomerProfile(skin_type="dry", sensitive=True)
+    assert storefront.customer_suggestions(new, False, s) == ["Dry skin", "Acne help"]
+    assert storefront.customer_suggestions(talked, True, s) == ["Show me something cheaper", "Any toners?", "Start over"]
+    assert storefront.customer_suggestions(talked, False, s) == ["Any toners?", "Start over"]   # nothing to be cheaper than
+    with pytest.raises(ValueError):
+        AssistantSettings(starters=["x" * 61])
+    with pytest.raises(ValueError):
+        AssistantSettings(follow_ups=[f"chip {i}" for i in range(9)])
+
+
 def test_customer_prompts_format():
     v = voice("store")
     assert "Gen C Beauty" in v["open"] and '{"answer": "...", "recommend"' in v["open"]
@@ -136,6 +153,20 @@ def test_store_channel_has_no_links_and_settings_apply(client):
     assert client.get("/api/public/config?channel=store").json()["enabled"] is False
     r = client.post("/api/public/chat", json={"channel": "store", "message": "hi"})
     assert r.status_code == 404
+    client.put("/admin/api/assistant", json=d["settings"])
+
+
+@DB
+def test_chips_set_in_the_admin_portal_reach_customers(client):
+    client.post("/admin/api/login", json={"name": "Tester", "password": "test-pass"})
+    d = client.get("/admin/api/assistant").json()
+    new = {**d["settings"], "starters": ["Help with acne", "Gift ideas"], "follow_ups": ["Any cheaper option?", "Show toners"]}
+    assert client.put("/admin/api/assistant", json=new).status_code == 200
+    assert client.get("/api/public/config?channel=store").json()["suggestions"] == ["Help with acne", "Gift ideas"]
+    _, m = ask(client, "I have oily skin with breakouts, what do you suggest?")
+    assert m["payload"]["suggestions"] == ["Any cheaper option?", "Show toners", "Start over"]
+    bad = client.put("/admin/api/assistant", json={**new, "starters": ["x" * 80]})
+    assert bad.status_code == 422
     client.put("/admin/api/assistant", json=d["settings"])
 
 

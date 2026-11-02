@@ -47,6 +47,13 @@ def set_provider(p) -> None:
 
 
 # ------------------------------------------------------------------ settings (admin portal)
+STARTERS = ["I have dry skin", "Oily skin and breakouts", "What's an essence?", "Best sunscreen for sensitive skin?",
+            "Which products have niacinamide?"]
+FOLLOW_UPS = ["Something cheaper", "I have sensitive skin", "Fragrance-free only"]
+START_OVER = "Start over"          # always the last chip; the page resets the chat instead of sending it
+MAX_CHIPS, MAX_CHIP_LEN = 8, 60
+
+
 class AssistantSettings(BaseModel):
     online_enabled: bool = True
     online_links: bool = Field(True, description="Online: product cards link to the product page")
@@ -54,6 +61,23 @@ class AssistantSettings(BaseModel):
     store_links: bool = Field(False, description="In store: product cards link to the product page")
     shop_url: str = Field("https://gencbeauty.com", max_length=200)
     search_fallback: bool = Field(True, description="No product URL on file: link to a shop search for its name")
+    starters: list[str] = Field(default_factory=lambda: list(STARTERS), description="Chips before the customer describes their skin")
+    follow_ups: list[str] = Field(default_factory=lambda: list(FOLLOW_UPS), description="Chips after an answer, before Start over")
+
+    @field_validator("starters", "follow_ups")
+    @classmethod
+    def _chips(cls, v: list[str]) -> list[str]:
+        out = []
+        for c in v:
+            c = " ".join(str(c).split())
+            if not c or c.lower() == START_OVER.lower() or c.lower() in (x.lower() for x in out):
+                continue
+            if len(c) > MAX_CHIP_LEN:
+                raise ValueError(f"A chip can have at most {MAX_CHIP_LEN} characters: {c[:20]}...")
+            out.append(c)
+        if len(out) > MAX_CHIPS:
+            raise ValueError(f"At most {MAX_CHIPS} chips per list")
+        return out
 
     @field_validator("shop_url")
     @classmethod
@@ -129,19 +153,19 @@ def welcome(channel: str) -> str:
             "or *I have dry, sensitive skin. Which moisturizer would suit me?*")
 
 
-STARTERS = ["I have dry skin", "Oily skin and breakouts", "What's an essence?", "Best sunscreen for sensitive skin?",
-            "Which products have niacinamide?"]
-
-
-def customer_suggestions(p: CustomerProfile, has_products: bool) -> list[str]:
+def customer_suggestions(p: CustomerProfile, has_products: bool, s: AssistantSettings) -> list[str]:
+    """Starter chips until the customer has said something about their skin, then the follow-up chips.
+    A follow-up is left out when it no longer makes sense: "cheaper" with no products shown, or sensitive skin /
+    fragrance once the customer has already said so."""
     if not (p.skin_type or p.concerns or p.categories or has_products):
-        return STARTERS
-    out = ["Something cheaper"] if has_products else []
-    if not p.sensitive:
-        out.append("I have sensitive skin")
-    if "fragrance" not in p.avoid:
-        out.append("Fragrance-free only")
-    return out + ["Start over"]
+        return list(s.starters)
+    out = []
+    for c in s.follow_ups:
+        t = c.lower()
+        if ("cheaper" in t and not has_products) or ("sensitive" in t and p.sensitive)                 or ("fragrance" in t and "fragrance" in p.avoid):
+            continue
+        out.append(c)
+    return out + [START_OVER]
 
 
 def product_link(card: dict, s: AssistantSettings, channel: str) -> Optional[str]:
@@ -184,7 +208,7 @@ def customer_answer(conn, provider, conv: dict, message: str, channel: str, s: A
     payload = out["payload"]
     if payload.get("products"):
         payload["products"] = [customer_card(c, s, channel) for c in payload["products"]]
-    payload["suggestions"] = customer_suggestions(out["profile"], bool(payload.get("products")))
+    payload["suggestions"] = customer_suggestions(out["profile"], bool(payload.get("products")), s)
     payload["links"] = s.links(channel)
     return out
 
@@ -245,7 +269,7 @@ def config(channel: Channel = "online"):
         s = load_assistant(conn)
     return {"enabled": s.enabled(channel), "links": s.links(channel), "channel": channel,
             "brand": {"name": settings.brand_name, "logo_url": settings.brand_logo_url},
-            "shop_url": s.shop_url, "currency": settings.currency, "welcome": welcome(channel), "suggestions": STARTERS}
+            "shop_url": s.shop_url, "currency": settings.currency, "welcome": welcome(channel), "suggestions": s.starters}
 
 
 class CustomerChatBody(BaseModel):
@@ -299,7 +323,7 @@ def customer_chat(body: CustomerChatBody, request: Request):
                 (message[:60], body.channel, secrets.token_urlsafe(24))).fetchone()
         n = conn.execute("SELECT count(*) AS n FROM chat_messages WHERE conversation_id = %s", (conv["id"],)).fetchone()["n"]
         if n >= MAX_MESSAGES:
-            return {"conversation": None, "message": {"role": "assistant", "payload": {"type": "text", "suggestions": ["Start over"]},
+            return {"conversation": None, "message": {"role": "assistant", "payload": {"type": "text", "suggestions": [START_OVER]},
                     "content": "This chat is getting long. Please start a new one so I can help you properly."}}
         conn.execute("INSERT INTO chat_messages (conversation_id, role, content) VALUES (%s, 'user', %s)", (conv["id"], message))
         status, meta = "ok", None
