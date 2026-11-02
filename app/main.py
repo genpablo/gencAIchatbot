@@ -45,8 +45,8 @@ def chat_ui():
     return FileResponse(STATIC / "chat.html", headers=NO_CACHE)
 
 
-@app.get("/shop")
-@app.get("/store")
+@app.api_route("/shop", methods=["GET", "HEAD"])      # HEAD: link checkers, shop embeds, health probes
+@app.api_route("/store", methods=["GET", "HEAD"])
 def customer_ui():
     """Customer assistant; the page reads its channel (online or store) from the path."""
     return FileResponse(STATIC / "assistant.html", headers=NO_CACHE)

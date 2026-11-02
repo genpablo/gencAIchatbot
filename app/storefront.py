@@ -217,6 +217,21 @@ def check_rate(key: str) -> None:
 
 
 # ------------------------------------------------------------------ endpoints
+_schema_ok = False
+
+
+def _require_schema(conn) -> None:
+    """Customer conversations need the v0.6 columns; say how to add them instead of failing on every message."""
+    global _schema_ok
+    if not _schema_ok:
+        _schema_ok = bool(conn.execute(
+            """SELECT 1 FROM information_schema.columns WHERE table_name = 'chat_conversations'
+                   AND column_name = 'access_token'""").fetchone())
+    if not _schema_ok:
+        log.error("customer assistant: database not upgraded; run `python -m app.ingest --init`")
+        raise HTTPException(503, "The assistant is being set up. Please try again later.")
+
+
 def _settings(conn, channel: str) -> AssistantSettings:
     s = load_assistant(conn)
     if not s.enabled(channel):
@@ -248,6 +263,7 @@ def customer_chat(body: CustomerChatBody, request: Request):
     check_rate(client_ip(request))
     with connect() as conn:
         s = _settings(conn, body.channel)
+        _require_schema(conn)
         conv = None
         if body.conversation:
             conv = conn.execute("SELECT * FROM chat_conversations WHERE access_token = %s AND channel = %s "

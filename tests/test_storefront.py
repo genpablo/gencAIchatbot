@@ -89,6 +89,7 @@ def ask(client, text, channel="online", conv=None):
 @DB
 def test_online_customer_gets_answers_and_product_links(client):
     assert client.get("/shop").status_code == 200 and client.get("/store").status_code == 200
+    assert client.head("/shop").status_code == 200 and client.head("/store").status_code == 200
     cfg = client.get("/api/public/config?channel=online").json()
     assert cfg["enabled"] and cfg["links"] and cfg["suggestions"]
     conv, m = ask(client, "hello")
