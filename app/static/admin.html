@@ -121,6 +121,7 @@
     <button data-tab="ranking" class="on">Ranking strategy</button>
     <button data-tab="import">Import products</button>
     <button data-tab="products">Products &amp; campaigns</button>
+    <button data-tab="assistant">Customer assistant</button>
     <button data-tab="staff">Staff accounts</button>
     <button data-tab="activity">Activity &amp; analytics</button>
   </nav>
@@ -265,6 +266,46 @@
 </section>
 
 <!-- ============ Staff accounts ============ -->
+<section data-panel="assistant" class="hidden">
+  <div class="card">
+    <h2>Customer assistant</h2>
+    <p class="sub">Customers ask their own questions, with no login. They get an answer and up to 3 products to consider, never a routine.
+      Suggested products pass the same safety, stock, expiry and budget rules as the staff app.</p>
+    <div class="grid2">
+      <div class="tile">
+        <b>Online shop</b> <a class="note" id="asOnlineLink" href="/shop" target="_blank" rel="noopener">/shop</a>
+        <p class="note">For gencbeauty.com: link to it or embed it in a page.</p>
+        <label style="display:block;margin:8px 0"><input type="checkbox" id="asOnline"> Available</label>
+        <label style="display:block"><input type="checkbox" id="asOnlineLinks"> Product cards link to the product page, so customers continue shopping</label>
+        <p class="note" id="asOnlineUse"></p>
+      </div>
+      <div class="tile">
+        <b>In-store screen</b> <a class="note" href="/store" target="_blank" rel="noopener">/store</a>
+        <p class="note">For a tablet or kiosk in the shop. The chat clears itself after 3 minutes without use.</p>
+        <label style="display:block;margin:8px 0"><input type="checkbox" id="asStore"> Available</label>
+        <label style="display:block"><input type="checkbox" id="asStoreLinks"> Product cards link to the product page (usually off in store: just name the product)</label>
+        <p class="note" id="asStoreUse"></p>
+      </div>
+    </div>
+    <h3>Product links</h3>
+    <div class="row">
+      <label>Online shop address <input id="asShop" style="width:260px" placeholder="https://gencbeauty.com"></label>
+      <label><input type="checkbox" id="asSearch"> No product URL on file: link to a shop search for the product name</label>
+    </div>
+    <p class="note" id="asUrls"></p>
+    <div class="row" style="margin-top:20px">
+      <button class="btn primary" id="saveAssistant" disabled>Save</button>
+      <button class="btn" id="resetAssistant" disabled>Discard changes</button>
+      <span class="note" id="assistantMeta"></span>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Embed on the online shop</h2>
+    <p class="sub">Paste this into a page or the theme footer on gencbeauty.com. Product links open in the shop window, not inside the frame.</p>
+    <textarea id="asEmbed" readonly style="min-height:72px;font-family:monospace;font-size:12px"></textarea>
+  </div>
+</section>
+
 <section data-panel="staff" class="hidden">
   <div class="card">
     <h2>Staff accounts</h2>
@@ -359,7 +400,7 @@ $("#logout").onclick = async () => { await api("/logout", {method:"POST"}); show
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   document.querySelectorAll("nav button").forEach(x => x.classList.toggle("on", x === b));
   document.querySelectorAll("[data-panel]").forEach(p => p.classList.toggle("hidden", p.dataset.panel !== b.dataset.tab));
-  ({ranking: loadRanking, import: loadImport, products: loadProducts, staff: loadStaff, activity: loadActivity})[b.dataset.tab]();
+  ({ranking: loadRanking, import: loadImport, products: loadProducts, assistant: loadAssistant, staff: loadStaff, activity: loadActivity})[b.dataset.tab]();
 });
 
 /* ---------------- Ranking strategy ---------------- */
@@ -442,7 +483,7 @@ function renderProducts() {
   $("#pCount").textContent = `${rows.length} of ${PRODUCTS.length} products` + (toCheck ? ` · ${toCheck} to check` : "");
   const unsearchable = PRODUCTS.filter(p => p.is_active && !p.searchable).length;
   $("#embedWarn").classList.toggle("hidden", !unsearchable);
-  $("#embedText").textContent = `${unsearchable} active product(s) are saved but not searchable yet (the model was unreachable).`;
+  $("#embedText").textContent = `${unsearchable} active product(s) are saved but not searchable yet (the embedding model was unreachable or has changed).`;
   $("#pTable").innerHTML = `<thead><tr><th>Product</th><th>AI reading</th><th class="num">Price</th><th class="num">Margin</th><th class="num">Stock</th>
     <th>Priority</th><th>Campaign boost</th><th>From</th><th>To</th><th>Hide</th><th class="num">Shown 30d</th><th class="num">Sold 30d</th><th></th></tr></thead><tbody>` +
     rows.map(p => {
@@ -587,12 +628,40 @@ async function loadActivity() {
       : area === "product" && "priority" in v && !("category" in v)
       ? `priority ${v.priority}, boost ${v.campaign_boost}${v.excluded ? ", hidden" : ""}${v.valid_from || v.valid_to ? `, ${v.valid_from || "…"} → ${v.valid_to || "…"}` : ""}`
       : generic(v);
-  const WHAT = {ranking: () => "Ranking strategy", product: t => "Product " + esc(t), user: t => "Staff account " + esc(t), import: t => "Import " + esc(t)};
+  const WHAT = {ranking: () => "Ranking strategy", customer_assistant: () => "Customer assistant", product: t => "Product " + esc(t), user: t => "Staff account " + esc(t), import: t => "Import " + esc(t)};
   $("#changesT").innerHTML = `<thead><tr><th>When</th><th>Who</th><th>What</th><th>Before</th><th>After</th></tr></thead><tbody>` +
     (d.changes.length ? d.changes.map(c => `<tr><td>${when(c.at)}</td><td>${esc(c.actor)}</td><td>${(WHAT[c.area] || (t => esc(c.area) + " " + esc(t)))(c.target)}</td>
       <td class="note">${fmt(c.area, c.old_value)}</td><td>${fmt(c.area, c.new_value)}</td></tr>`).join("")
       : `<tr><td colspan="5" class="note">No changes yet.</td></tr>`) + "</tbody>";
 }
+
+/* ---------------- Customer assistant ---------------- */
+let AS_SAVED = null, AS = null;
+const AS_FIELDS = [["#asOnline", "online_enabled"], ["#asOnlineLinks", "online_links"], ["#asStore", "store_enabled"],
+                   ["#asStoreLinks", "store_links"], ["#asSearch", "search_fallback"]];
+async function loadAssistant() {
+  const d = await api("/assistant"); AS_SAVED = d.settings; AS = {...AS_SAVED};
+  $("#assistantMeta").textContent = d.updated_by ? `Last saved by ${d.updated_by}, ${when(d.updated_at)}` : "Using the defaults. Not saved yet.";
+  const use = u => u ? `Last 30 days: ${u.chats} chats, ${u.messages} messages${u.errors ? `, ${u.errors} errors` : ""}.` : "Not used in the last 30 days.";
+  $("#asOnlineUse").textContent = use(d.usage.online); $("#asStoreUse").textContent = use(d.usage.store);
+  $("#asUrls").textContent = `${d.products.with_url} of ${d.products.total} active products have a product page URL (Product URL column in the import sheet).`;
+  $("#asEmbed").value = `<iframe src="${location.origin}/shop" title="Gen C Beauty assistant" style="width:100%;max-width:440px;height:640px;border:1px solid #ddd;border-radius:8px"></iframe>`;
+  renderAssistant();
+}
+function renderAssistant() {
+  AS_FIELDS.forEach(([sel, k]) => { $(sel).checked = AS[k]; });
+  $("#asShop").value = AS.shop_url;
+  $("#asOnlineLinks").disabled = !AS.online_enabled; $("#asStoreLinks").disabled = !AS.store_enabled;
+  const dirty = JSON.stringify(AS) !== JSON.stringify(AS_SAVED);
+  $("#saveAssistant").disabled = !dirty; $("#resetAssistant").disabled = !dirty;
+}
+AS_FIELDS.forEach(([sel, k]) => { $(sel).onchange = e => { AS[k] = e.target.checked; renderAssistant(); }; });
+$("#asShop").oninput = e => { AS.shop_url = e.target.value.trim(); renderAssistant(); };
+$("#resetAssistant").onclick = () => { AS = {...AS_SAVED}; renderAssistant(); };
+$("#saveAssistant").onclick = async () => {
+  try { await api("/assistant", {method:"PUT", body: JSON.stringify(AS)}); await loadAssistant(); }
+  catch (e) { $("#assistantMeta").textContent = "Error: " + e.message; }
+};
 
 /* ---------------- Product details (what the AI read) ---------------- */
 let DETAIL = null;

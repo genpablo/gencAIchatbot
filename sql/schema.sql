@@ -212,3 +212,10 @@ CREATE TABLE IF NOT EXISTS analytics_events (
 );
 CREATE INDEX IF NOT EXISTS analytics_events_at ON analytics_events (at);
 CREATE INDEX IF NOT EXISTS analytics_events_event_at ON analytics_events (event, at);
+
+-- v0.6: customer assistant for the online shop and in-store screens (safe to re-run)
+ALTER TABLE products ADD COLUMN IF NOT EXISTS product_url TEXT;             -- product page on the online shop
+ALTER TABLE chat_conversations ALTER COLUMN user_id DROP NOT NULL;          -- NULL = a customer, not staff
+ALTER TABLE chat_conversations ADD COLUMN IF NOT EXISTS channel TEXT NOT NULL DEFAULT 'staff';  -- staff | online | store
+ALTER TABLE chat_conversations ADD COLUMN IF NOT EXISTS access_token TEXT;  -- customer's random conversation key
+CREATE UNIQUE INDEX IF NOT EXISTS chat_conversations_token ON chat_conversations (access_token);

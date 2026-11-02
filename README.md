@@ -8,6 +8,8 @@ shortlist that already passed the safety, stock, expiry and budget rules.
 | Page | Who | What |
 | --- | --- | --- |
 | `/` | Staff (own login) | Chat assistant, installable on iOS/Android home screens |
+| `/shop` | Online shoppers (no login) | Customer assistant for gencbeauty.com: answers questions, suggests products that link to their shop page |
+| `/store` | Shoppers in the store (no login) | The same assistant for an in-store tablet or kiosk; product links off by default |
 | `/admin` | Managers (`ADMIN_PASSWORD`) | Ranking strategy, Excel product import, products & campaigns, staff accounts, analytics |
 | `/docs` | Developers | API documentation |
 
@@ -22,11 +24,13 @@ staff message ─> chat (app/chat.py): remembers the customer, follow-ups, produ
 
 | `LLM_PROVIDER` | Chat model | Embeddings | Use for |
 | --- | --- | --- | --- |
-| `ollama` | `qwen3.5:9b` (local) | `bge-m3` (local, 1024-d) | Local testing, no cloud |
+| `ollama` | `qwen3.5:9b` (local) | `qwen3-embedding:0.6b` (local, 1024-d) | Local testing, no cloud |
 | `bedrock` | Claude Sonnet 5 / Haiku 4.5, Qwen3, DeepSeek V3.2 | Cohere Embed v4 (1024-d) | Production on AWS |
 | `foundry` | Your Microsoft Foundry deployments (GPT-4.1/5, DeepSeek, Llama, Grok, ...) | e.g. `text-embedding-3-large` at 1024-d | Production on Azure |
-| `openai` / `openrouter` | Any model on an OpenAI-compatible service | Same or another service, at 1024-d | Third-party providers |
+| `openai` / `openrouter` | Any model on an OpenAI-compatible service | e.g. `qwen/qwen3-embedding-8b` shortened to 1024-d | Third-party providers |
 | `mock` | none (rule-based) | hash vectors | Tests |
+
+Embeddings can come from any other service and model: see [Embedding models](#embedding-models).
 
 ## 1. Local testing (Ollama + Qwen 3.5 9B)
 
@@ -58,7 +62,7 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 cp .env.example .env  # set ADMIN_PASSWORD and a random SECRET_KEY
 ollama pull qwen3.5:9b
-ollama pull bge-m3
+ollama pull qwen3-embedding:0.6b
 docker compose up -d
 .venv/bin/python -m app.ingest --init --seed --embed  # new, empty database only
 .venv/bin/python -m app.users add tester "Local Tester"
@@ -76,7 +80,7 @@ Requirements: Python 3.11+, Docker Desktop, [Ollama for Windows](https://ollama.
 ```powershell
 cd C:\RAG\kbeauty-recommender
 ollama pull qwen3.5:9b
-ollama pull bge-m3
+ollama pull qwen3-embedding:0.6b
 docker compose up -d                              # PostgreSQL 16 + pgvector
 py -m venv .venv
 .venv\Scripts\activate
@@ -123,6 +127,32 @@ Android: open in Chrome > menu > *Install app* (or *Add to Home screen*).
 It then opens full screen like an app. Layout: phones get a slide-out menu and swipeable product
 choices; iPad landscape and desktops get a sidebar with chat history.
 
+## 2a. Customer assistant (`/shop` online, `/store` in store)
+
+Customers ask their own questions with no login: "What does niacinamide do?", "I have dry, sensitive skin,
+which moisturizer?", "Is the Cica Repair Ampoule OK for redness?". Each answer ends with up to 3 products to
+consider (never a step-by-step routine), chosen only from products that pass the safety, stock, expiry and
+budget filters. The chat remembers what the customer says about themselves (skin type, pregnancy, fragrance-free,
+budget) for the rest of the conversation. "Start over" or *New chat* clears it.
+
+| Channel | Page | Product cards |
+| --- | --- | --- |
+| Online shop | `/shop` | **View product** opens the product page on gencbeauty.com so the customer continues shopping |
+| In store | `/store` | Just name the product (links off by default); larger text; the chat clears after 3 minutes without use |
+
+Managers set both up in **Admin > Customer assistant**: switch each channel on or off, and turn product links
+on or off per channel. Links use the product's **Product URL** from the import sheet (`samples/gencbeauty_products.xlsx`
+already has this column). If a product has no URL on file, the link is a shop search for its name
+(`https://gencbeauty.com/search.php?search_query=...`); that fallback can be switched off.
+
+**Embed on gencbeauty.com**: paste the iframe snippet shown in that admin tab into a page or the theme footer.
+Inside the frame, product links open in the shop window, not inside the frame. Online, the conversation survives
+page reloads in the same browser tab. In store, nothing is kept for the next shopper.
+
+Customer messages are rate-limited per visitor (`PUBLIC_CHAT_PER_MINUTE`, default 8; `PUBLIC_CHAT_PER_HOUR`, default 60),
+because each one may call the AI model. They appear in analytics as event `customer_chat` (CSV export) and in
+*Recent recommendations* as `customer:online` / `customer:store`; they never show in staff chat history.
+
 ## 3. Admin portal (managers, `/admin`)
 
 | Tab | What managers can do |
@@ -140,7 +170,7 @@ Every change is logged with the manager's name and time. Put the service behind 
 1. **Fill the sheet.** Only **SKU** is required as a column. A new product needs **SKU, Name, Price**
    (a Description is strongly advised). Add **Margin (%)** and **Priority** for business ranking.
    Optional: Cost (margin fallback for older catalogs), Stock, Brand, Category, Active,
-   **Expiry**, **Ingredients**. Column names can vary ("Product Code", "Retail Price", "Details", "Best
+   **Expiry**, **Ingredients**, **Product URL** (its page on the online shop). Column names can vary ("Product Code", "Retail Price", "Details", "Best
    before", "INCI" all work). *Download Excel template* gives a sheet with instructions;
    `samples/sample_products.xlsx` is an example.
 2. **Write good descriptions**: what it does, who it is for (skin types, age), who should avoid it, and the
@@ -199,14 +229,13 @@ Embeddings are requested at `EMBED_DIM` (1024); a model with a fixed different s
 API. For OpenRouter, `LLM_PROVIDER=openrouter` and in `.env`:
 ```
 LLM_API_KEY=...
-LLM_CHAT_MODEL=openai/gpt-4.1-mini      # model id as the service lists it
+LLM_CHAT_MODEL=qwen/qwen3.7-flash       # model id as the service lists it (default on OpenRouter)
 LLM_PARSE_MODEL=                        # optional cheaper model for reading notes/descriptions
-LLM_EMBED_MODEL=openai/text-embedding-3-large
+LLM_EMBED_MODEL=qwen/qwen3-embedding-8b # or openai/text-embedding-3-large
 ```
 For any other service, use `LLM_PROVIDER=openai` and set `LLM_BASE_URL` (e.g. `https://api.together.xyz/v1`).
 The embedding model must output `EMBED_DIM` values; models with a fixed other size are reported clearly.
-If the service has no embeddings (e.g. Groq), take them from another one with `LLM_EMBED_BASE_URL` and
-`LLM_EMBED_API_KEY`; `http://localhost:11434/v1` uses local Ollama with `LLM_EMBED_MODEL=bge-m3`.
+If the service has no embeddings (e.g. Groq), take them from another one: see below.
 Customer notes and product data go to the service you choose, so check its data retention terms.
 
 **Thinking off (`DISABLE_THINKING=true`, the default).** Reasoning models think before answering unless told
@@ -224,7 +253,39 @@ The app asks every model not to think and learns, on the first call per model, w
 A model that rejects a field costs one extra, failed call per field after each app start; later calls go
 straight through.
 
-After switching provider or embedding model: `python -m app.ingest --reembed`.
+### Embedding models
+
+The embedding model is chosen apart from the chat model, so any model can be used with any chat provider.
+`EMBED_PROVIDER` picks the service (empty = the same as `LLM_PROVIDER`) and `EMBED_MODEL` the model
+(empty = that service's `*_EMBED_*` setting):
+
+| `EMBED_PROVIDER` | Example `EMBED_MODEL` | Notes |
+| --- | --- | --- |
+| `ollama` | `qwen3-embedding:0.6b` (default), `qwen3-embedding:8b`, `bge-m3` | Local; `ollama pull <model>` |
+| `openai` | `text-embedding-3-large`, `Qwen/Qwen3-Embedding-0.6B` | Any OpenAI-compatible `/embeddings` at `EMBED_BASE_URL`: OpenAI, vLLM, TEI, Infinity, Together, Mistral, Jina, ... |
+| `openrouter` | `qwen/qwen3-embedding-8b`, `openai/text-embedding-3-large` | OpenRouter's URL by default |
+| `foundry` | `text-embedding-3-large` | A Foundry deployment name |
+| `bedrock` | `cohere.embed-v4:0`, `amazon.titan-embed-text-v2:0` | |
+| `your.module:ClassName` | anything | Your class with `embed(texts, kind) -> list of vectors`, `kind` is `document` or `query` |
+
+For example, chat on Foundry and OpenAI embeddings:
+```
+EMBED_PROVIDER=openai
+EMBED_BASE_URL=https://api.openai.com/v1
+EMBED_API_KEY=sk-...                  # the chat key is never sent to a separate embedding service
+EMBED_MODEL=text-embedding-3-large
+```
+Every model must output `EMBED_DIM` values (1024). Matryoshka models (Qwen3-Embedding 4B/8B,
+`text-embedding-3-*`, Nomic, Cohere v4, Jina v3+, Gemini, Voyage 3) are asked for that size and shortened
+to it if needed (`EMBED_TRUNCATE=auto`). Models that expect a prefix get it automatically: Qwen3-Embedding
+gets a retrieval instruction on queries, E5 / Nomic / mxbai their `query:` / `passage:`-style prefixes;
+set `EMBED_QUERY_PREFIX` / `EMBED_DOCUMENT_PREFIX` for other models.
+
+Every product vector records the model that made it. After changing the embedding model, run
+`python -m app.ingest --embed` (or *Retry now* in the admin Products tab): it re-embeds every product made
+with another model; until then those products are left out of search, never mixed with the new model's
+queries. `/health` shows `other_model_products` still waiting. Use `--reembed` after changing only the
+prefixes.
 
 ## 6. Analytics
 
@@ -286,7 +347,7 @@ environment), and ACR Tasks are blocked, so the image is built locally.
 
 ```powershell
 pytest -q                                                      # unit tests, no DB needed
-set TEST_DATABASE_URL=postgresql://rag:rag@localhost:5432/kbeauty_test
+set TEST_DATABASE_URL=postgresql://rag:rag@127.0.0.1:5432/kbeauty_test
 pytest -q                                                      # + end-to-end (wipes that DB!)
 ```
 Create the test DB first: `docker compose exec db createdb -U rag kbeauty_test`.

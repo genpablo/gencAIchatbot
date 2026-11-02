@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0F0F2D">
+<link rel="icon" href="/static/icons/favicon.png">
+<title>Gen C Beauty Assistant</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cabin:wght@400;500;600;700&family=Nunito:wght@700;800&display=swap" rel="stylesheet">
+<style>
+  /* Customer assistant: /shop (online shop, product links) and /store (in-store screen). Same design
+     language as the staff app and gencbeauty.com: white page, navy bars, uppercase Nunito buttons. */
+  :root {
+    color-scheme: light;
+    --navy: #0F0F2D; --navy-2: #212152; --blue: #1F439E; --pink: #E40E47; --pink-bg: #FDECEF;
+    --green: #128234; --ink: #000000; --text: #2B2B2B; --muted: #6B6B6B; --line: #DDDDDD;
+    --field: #EFEFEF; --soft: #F5F5F7; --white: #FFFFFF;
+    --body: "Cabin", Arial, Helvetica, sans-serif; --btn: "Nunito", Arial, Helvetica, sans-serif;
+    --safe-b: env(safe-area-inset-bottom, 0px); --safe-t: env(safe-area-inset-top, 0px);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--white); color: var(--text); font-family: var(--body); font-size: 15px; }
+  button { font: inherit; cursor: pointer; }
+  .hidden { display: none !important; }
+  #app { height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 8px; padding: calc(8px + var(--safe-t)) 12px 8px; border-bottom: 1px solid var(--line); }
+  header .brand-slot { flex: 1; }
+  .logo { display: block; height: 34px; max-width: 180px; object-fit: contain; }
+  .wordmark { font-weight: 700; font-size: 19px; letter-spacing: .06em; color: var(--ink); }
+  .wordmark small { display: block; font-size: 7px; letter-spacing: .3em; font-weight: 600; margin-top: -2px; }
+  .btn { font-family: var(--btn); font-weight: 800; text-transform: uppercase; letter-spacing: .02em; font-size: 12px;
+         border-radius: 5px; border: 1.5px solid var(--navy-2); background: var(--white); color: var(--navy-2);
+         padding: 8px 12px; min-height: 38px; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; }
+  .btn.primary { background: var(--navy); border-color: var(--navy); color: var(--white); }
+  .strip { background: var(--navy); color: var(--white); font-size: 12.5px; padding: 6px 14px; text-align: center; }
+  #scroll { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+  #msgs { max-width: 820px; margin: 0 auto; padding: 14px 14px 6px; }
+  .msg { display: flex; gap: 10px; margin: 14px 0; }
+  .msg.user { justify-content: flex-end; }
+  .bubble { max-width: 85%; background: var(--navy-2); color: var(--white); padding: 10px 14px; border-radius: 18px 18px 4px 18px; white-space: pre-wrap; word-wrap: break-word; line-height: 1.4; }
+  .avatar { flex: 0 0 30px; height: 30px; border-radius: 50%; background: var(--navy); color: var(--white); display: grid; place-items: center; font-family: var(--btn); font-weight: 800; font-size: 11px; }
+  .bot { flex: 1; min-width: 0; line-height: 1.5; }
+  .bot .text p { margin: 4px 0 8px; }
+  .bot .text strong { color: var(--ink); }
+  .bot.err .text { color: var(--pink); }
+  .opts { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; margin-top: 8px; }
+  .card { border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; display: flex; flex-direction: column; min-width: 0; }
+  .card .badge { align-self: flex-start; font-family: var(--btn); font-weight: 800; font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; padding: 2px 8px; border-radius: 3px; background: var(--soft); color: var(--muted); margin-bottom: 8px; }
+  .card .row { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+  .card .name { font-weight: 600; color: var(--ink); line-height: 1.3; }
+  .card .price { font-weight: 700; color: var(--green); white-space: nowrap; }
+  .card .meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .card .why { font-size: 14px; margin-top: 8px; }
+  .card ul { margin: 6px 0 0; padding-left: 18px; font-size: 13px; }
+  .card .ings { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .card .note { font-size: 12px; color: var(--pink); background: var(--pink-bg); border-radius: 4px; padding: 4px 8px; margin-top: 8px; }
+  .card .go { margin-top: auto; padding-top: 12px; }
+  .card .go .btn { width: 100%; }
+  .typing span { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); margin-right: 4px; animation: blink 1.2s infinite; }
+  .typing span:nth-child(2) { animation-delay: .2s; } .typing span:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%, 80%, 100% { opacity: .2; } 40% { opacity: 1; } }
+  .dock { border-top: 1px solid var(--line); padding: 8px 0 calc(10px + var(--safe-b)); }
+  .dock-in { max-width: 820px; margin: 0 auto; padding: 0 12px; }
+  #chips { display: flex; gap: 8px; overflow-x: auto; padding: 2px 0 8px; scrollbar-width: none; }
+  #chips::-webkit-scrollbar { display: none; }
+  #chips button { flex: 0 0 auto; border: 1px solid var(--line); background: var(--white); color: var(--navy-2); border-radius: 999px; padding: 7px 14px; font-size: 13.5px; min-height: 36px; }
+  #chips button:hover { border-color: var(--navy-2); }
+  form.compose { display: flex; align-items: flex-end; gap: 8px; background: var(--field); border-radius: 24px; padding: 6px 6px 6px 18px; border: 1px solid transparent; }
+  form.compose:focus-within { border-color: var(--navy-2); background: var(--white); }
+  form.compose textarea { flex: 1; border: 0; background: transparent; resize: none; font: inherit; font-size: 16px; line-height: 1.4; padding: 8px 0; max-height: 120px; outline: none; color: var(--ink); }
+  form.compose button { flex: 0 0 40px; height: 40px; border-radius: 50%; border: 0; background: var(--navy); color: var(--white); display: grid; place-items: center; }
+  form.compose button:disabled { background: #B9B9C3; }
+  .hint { text-align: center; font-size: 11.5px; color: var(--muted); margin-top: 6px; }
+  .off { margin: auto; text-align: center; padding: 32px; color: var(--muted); }
+  /* in-store screens are read at arm's length */
+  body.store { font-size: 17px; }
+  body.store .card .name, body.store .why { font-size: 16px; }
+  @media (max-width: 520px) { .opts { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; margin: 0 -14px; padding: 0 14px 6px; scrollbar-width: none; }
+    .opts .card { flex: 0 0 min(80vw, 290px); scroll-snap-align: start; } .avatar { display: none; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="brand-slot"></div>
+    <button class="btn" id="newBtn" type="button">New chat</button>
+  </header>
+  <div class="strip" id="strip">Ask about skincare or our products</div>
+  <div id="scroll"><div id="msgs"></div></div>
+  <div class="dock" id="dock"><div class="dock-in">
+    <div id="chips"></div>
+    <form class="compose" id="compose">
+      <textarea id="input" rows="1" maxlength="1000" placeholder="Ask a question or describe your skin" enterkeyhint="send" aria-label="Your question"></textarea>
+      <button id="send" aria-label="Send" disabled><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+    </form>
+    <div class="hint">Suggestions come from our product information. Check the label for allergies, and ask your doctor if unsure.</div>
+  </div></div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const md = s => esc(s).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/\*(.+?)\*/g, "<em>$1</em>")
+                      .split(/\n{2,}/).map(p => `<p>${p.replace(/\n/g, "<br>")}</p>`).join("");
+const CAT = {cleanser:"Cleanser", toner:"Toner", essence:"Essence", serum:"Serum / ampoule", cream:"Moisturizer", sunscreen:"Sunscreen", mask:"Mask", other:"Skincare"};
+const CHANNEL = location.pathname.replace(/\/+$/, "") === "/store" ? "store" : "online";
+const STORE_IDLE_MS = 3 * 60 * 1000;          // in store, the next shopper gets a fresh chat
+const KEY = "kb_customer_conv";
+let CFG = null, CUR = "USD", CONV = null, BUSY = false, idle = null;
+const money = n => { try { return new Intl.NumberFormat("en-US", {style:"currency", currency:CUR}).format(n); } catch { return n; } };
+// Online, the chat survives page reloads in this tab. In store, nothing is kept for the next person.
+const session = {get: () => { try { return CHANNEL === "online" ? sessionStorage.getItem(KEY) : null; } catch { return null; } },
+                 set: v => { try { if (CHANNEL === "online") v ? sessionStorage.setItem(KEY, v) : sessionStorage.removeItem(KEY); } catch {} }};
+// Embedded in a shop page: product links open in the shop window, not inside the frame
+const FRAMED = (() => { try { return window.top !== window.self; } catch { return true; } })();
+
+function paintBrand(brand) {
+  const wordmark = `<div class="wordmark">GEN'C BEAUTY<small>GENUINE · CLASSY</small></div>`;
+  const el = $(".brand-slot");
+  el.innerHTML = brand?.logo_url ? `<img class="logo" src="${esc(brand.logo_url)}" alt="${esc(brand.name || "Gen C Beauty")}">` : wordmark;
+  const img = el.querySelector("img"); if (img) img.onerror = () => { el.innerHTML = wordmark; };
+}
+
+async function boot() {
+  document.body.classList.toggle("store", CHANNEL === "store");
+  try { const r = await fetch(`/api/public/config?channel=${CHANNEL}`); CFG = await r.json(); }
+  catch { CFG = null; }
+  if (!CFG || !CFG.enabled) {
+    paintBrand(CFG?.brand);
+    $("#scroll").innerHTML = `<div class="off">The assistant is not available right now.</div>`;
+    $("#dock").classList.add("hidden"); $("#newBtn").classList.add("hidden"); $("#strip").classList.add("hidden");
+    return;
+  }
+  CUR = CFG.currency; paintBrand(CFG.brand);
+  if (CFG.brand?.name) document.title = `${CFG.brand.name} Assistant`;
+  CONV = session.get();
+  welcome();
+}
+
+function welcome() {
+  $("#msgs").innerHTML = "";
+  render({role: "assistant", content: CFG.welcome, payload: {}});
+  chips(CFG.suggestions);
+}
+function newChat() { if (BUSY) return; CONV = null; session.set(null); welcome(); }
+$("#newBtn").onclick = newChat;
+
+function safeUrl(u) { return typeof u === "string" && /^https?:\/\//i.test(u) ? u : null; }
+function card(c) {
+  const benefits = (c.key_benefits || []).length ? `<ul>${c.key_benefits.map(b => `<li>${esc(b)}</li>`).join("")}</ul>` : "";
+  const ings = (c.key_ingredients || []).length ? `<div class="ings">Key ingredients: ${esc(c.key_ingredients.join(", "))}</div>` : "";
+  const notes = (c.notes || []).map(n => `<div class="note">${esc(n)}</div>`).join("");
+  const url = safeUrl(c.url);
+  const go = url ? `<div class="go"><a class="btn primary" href="${esc(url)}" target="${FRAMED ? "_top" : "_blank"}" rel="noopener">View product</a></div>` : "";
+  return `<div class="card"><span class="badge">${esc(CAT[c.category] || c.category)}</span>
+    <div class="row"><div class="name">${esc(c.name)}</div><div class="price">${money(c.price)}</div></div>
+    ${c.brand ? `<div class="meta">${esc(c.brand)}</div>` : ""}${c.reason ? `<div class="why">${esc(c.reason)}</div>` : ""}
+    ${benefits}${ings}${notes}${go}</div>`;
+}
+function render(m) {
+  const wrap = document.createElement("div");
+  if (m.role === "user") { wrap.className = "msg user"; wrap.innerHTML = `<div class="bubble">${esc(m.content)}</div>`; }
+  else {
+    const p = m.payload || {};
+    wrap.className = "msg";
+    let body = `<div class="text">${md(m.content)}</div>`;
+    if ((p.products || []).length) body += `<div class="opts">${p.products.map(card).join("")}</div>`;
+    wrap.innerHTML = `<div class="avatar">G'C</div><div class="bot ${p.error ? "err" : ""}">${body}</div>`;
+  }
+  $("#msgs").appendChild(wrap);
+}
+function chips(list) { $("#chips").innerHTML = (list || []).map(c => `<button type="button" data-chip="${esc(c)}">${esc(c)}</button>`).join(""); }
+$("#chips").onclick = e => { const b = e.target.closest("[data-chip]"); if (!b) return;
+  if (b.dataset.chip === "Start over") newChat(); else send(b.dataset.chip); };
+const scrollDown = () => requestAnimationFrame(() => { const s = $("#scroll"); s.scrollTop = s.scrollHeight; });
+
+const input = $("#input");
+function autosize() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 120) + "px"; $("#send").disabled = BUSY || !input.value.trim(); }
+input.addEventListener("input", autosize);
+input.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#compose").requestSubmit(); } });
+$("#compose").onsubmit = e => { e.preventDefault(); send(input.value); };
+
+async function send(text) {
+  text = (text || "").trim(); if (!text || BUSY) return;
+  BUSY = true; input.value = ""; autosize(); chips([]);
+  render({role: "user", content: text});
+  const typing = document.createElement("div"); typing.className = "msg";
+  typing.innerHTML = `<div class="avatar">G'C</div><div class="bot"><div class="typing"><span></span><span></span><span></span></div></div>`;
+  $("#msgs").appendChild(typing); scrollDown();
+  try {
+    const r = await fetch("/api/public/chat", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({channel: CHANNEL, conversation: CONV, message: text})});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(typeof d.detail === "string" ? d.detail : "Something went wrong. Please try again.");
+    CONV = d.conversation; session.set(CONV);
+    typing.remove(); render(d.message); chips(d.message.payload?.suggestions || []);
+  } catch (err) {
+    typing.remove(); render({role: "assistant", content: err.message, payload: {error: true}});
+  } finally { BUSY = false; autosize(); scrollDown(); }
+}
+
+if (CHANNEL === "store") {
+  const poke = () => { clearTimeout(idle); idle = setTimeout(() => { if (!BUSY && CONV) newChat(); }, STORE_IDLE_MS); };
+  ["pointerdown", "keydown", "touchstart"].forEach(ev => document.addEventListener(ev, poke, {passive: true}));
+  poke();
+}
+boot();
+</script>
+</body>
+</html>

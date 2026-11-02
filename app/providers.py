@@ -1,12 +1,12 @@
 """LLM + embedding providers. Switch with LLM_PROVIDER = ollama | bedrock | foundry | openai | openrouter | mock.
+Embeddings can come from another service and model: see app/embeddings.py (EMBED_PROVIDER, EMBED_MODEL).
 
-- ollama : local testing (e.g. qwen3.5:9b for chat, bge-m3 for embeddings)
+- ollama : local testing (e.g. qwen3.5:9b for chat, qwen3-embedding:0.6b for embeddings)
 - foundry: production on Microsoft Foundry (Azure), OpenAI-compatible v1 endpoint: GPT, DeepSeek, Llama, Grok ...
            deployments; API key or Microsoft Entra ID
 - bedrock: production on Amazon Bedrock (Claude / Qwen / DeepSeek via the Converse API,
            Cohere Embed v4 or Titan V2 for embeddings)
-- openai : any third-party service with an OpenAI-compatible API (OpenAI, Together, Groq, vLLM, LM Studio ...);
-           embeddings can come from a different service than chat
+- openai : any third-party service with an OpenAI-compatible API (OpenAI, Together, Groq, vLLM, LM Studio ...)
 - openrouter: the same, with OpenRouter's URL as the default
 - mock   : no model at all; deterministic hash embeddings, chat returns nothing so the
            recommender uses its rule-based fallback. Useful for CI and DB testing.
@@ -45,8 +45,10 @@ class ProviderError(RuntimeError):
 class OllamaProvider:
     name = "ollama"
 
-    def __init__(self, client: httpx.Client | None = None):
-        self.client = client or httpx.Client(base_url=settings.ollama_url, timeout=settings.ollama_timeout_s)
+    def __init__(self, client: httpx.Client | None = None, url: str = ""):
+        self.url = url or settings.ollama_url
+        self.client = client or httpx.Client(base_url=self.url, timeout=settings.ollama_timeout_s)
+        self.embed_model = settings.ollama_embed_model
         self._think_supported = True
 
     def model_label(self, role: Role) -> str:
@@ -56,7 +58,7 @@ class OllamaProvider:
         try:
             return self.client.post(path, json=body)
         except httpx.ConnectError as e:
-            raise ProviderError(f"Cannot reach Ollama at {settings.ollama_url}. Is Ollama running? "
+            raise ProviderError(f"Cannot reach Ollama at {self.url}. Is Ollama running? "
                                 f"(Windows: start the Ollama app, or run `ollama serve`)") from e
         except httpx.TimeoutException as e:
             raise ProviderError(f"Ollama timed out after {settings.ollama_timeout_s}s; the model may still be "
@@ -70,7 +72,7 @@ class OllamaProvider:
 
     def embed(self, texts, kind="document"):
         out: list[list[float]] = []
-        model = settings.ollama_embed_model
+        model = self.embed_model
         for i in range(0, len(texts), 32):
             r = self._post("/api/embed", {"model": model, "input": texts[i:i + 32]})
             self._check(r, model)
@@ -119,13 +121,14 @@ class BedrockProvider:
             import boto3
             client = boto3.client("bedrock-runtime", region_name=settings.aws_region)
         self.rt = client
+        self.embed_model = settings.bedrock_embed_model
         self._opts: dict[str, dict] = {}            # per model: the request options it accepted
 
     def model_label(self, role: Role) -> str:
         return settings.bedrock_parse_model if role == "parse" else settings.bedrock_chat_model
 
     def embed(self, texts, kind="document"):
-        model = settings.bedrock_embed_model
+        model = self.embed_model
         if "titan-embed" in model:  # Titan V2: one text per call
             out = []
             for t in texts:
@@ -178,14 +181,15 @@ class BedrockProvider:
 
 # --------------------------------------------------------------------------- OpenAI-compatible services
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_CHAT_MODEL = "qwen/qwen3.7-flash"           # used on OpenRouter when LLM_CHAT_MODEL is empty
 OPENAI_COMPATIBLE = ("openai", "openrouter")
 
 
-def openai_base(url: str) -> str:
+def openai_base(url: str, var: str = "LLM_BASE_URL") -> str:
     """Accepts a base URL or a pasted full endpoint and returns the base, e.g. https://openrouter.ai/api/v1"""
     u = (url or "").strip().split("?")[0].rstrip("/")
     if not u:
-        raise ProviderError("LLM_BASE_URL is empty. Use your provider's OpenAI-compatible URL, "
+        raise ProviderError(f"{var} is empty. Use your provider's OpenAI-compatible URL, "
                             f"e.g. {OPENROUTER_URL}")
     return re.sub(r"/(chat/completions|embeddings)$", "", u)
 
@@ -241,20 +245,17 @@ class OpenAICompatibleProvider:
 
     def _configure(self) -> None:
         self.base = openai_base(settings.llm_base_url or (OPENROUTER_URL if settings.provider == "openrouter" else ""))
-        self.embed_base = openai_base(settings.llm_embed_base_url or self.base)
+        self.key = settings.llm_api_key
+        self.embed_model = settings.llm_embed_model
         self.timeout = settings.llm_timeout_s
         self.service = urlsplit(self.base).hostname or self.base
 
     def model_label(self, role: Role) -> str:
-        return settings.llm_parse_model if role == "parse" else settings.llm_chat_model
+        model = settings.llm_parse_model if role == "parse" else settings.llm_chat_model
+        return model or (OPENROUTER_CHAT_MODEL if self.base == OPENROUTER_URL else "")
 
-    def _embed_model(self) -> str:
-        return settings.llm_embed_model
-
-    def _headers(self, embed: bool = False) -> dict:
-        # A separate embedding service never receives the chat key.
-        key = settings.llm_embed_api_key if embed and settings.llm_embed_base_url else settings.llm_api_key
-        return {"Authorization": f"Bearer {key}"} if key else {}      # local servers need no key
+    def _headers(self) -> dict:
+        return {"Authorization": f"Bearer {self.key}"} if self.key else {}      # local servers need no key
 
     def _not_found(self, model: str) -> str:
         return f"Model '{model}' was not found at {self.service}. Check the model id and {self.endpoint_var}."
@@ -265,10 +266,10 @@ class OpenAICompatibleProvider:
         return {"reasoning_effort": REASONING_EFFORT_OFF[0],         # GPT-5+ / GPT Luna / o-series
                 "thinking": {"type": "disabled"}}                    # DeepSeek V3.1+ / Flash
 
-    def _post(self, url: str, body: dict, model: str, embed: bool = False) -> httpx.Response:
+    def _post(self, url: str, body: dict, model: str) -> httpx.Response:
         for attempt in range(4):
             try:
-                r = self.client.post(url, json=body, headers=self._headers(embed))
+                r = self.client.post(url, json=body, headers=self._headers())
             except httpx.ConnectError as e:
                 raise ProviderError(f"Cannot reach {self.service} at {url}. Check {self.endpoint_var} and the network.") from e
             except httpx.TimeoutException as e:
@@ -304,19 +305,19 @@ class OpenAICompatibleProvider:
         return data[field]
 
     def embed(self, texts, kind="document"):
-        model, out = self._embed_model(), []
+        model, out = self.embed_model, []
         if not model:
-            raise ProviderError(f"No embedding model is set for {self.service}; check the model settings in .env.")
-        url = f"{self.embed_base}/embeddings"
+            raise ProviderError(f"No embedding model is set for {self.service}; set EMBED_MODEL in .env.")
+        url = f"{self.base}/embeddings"
         for i in range(0, len(texts), 16):
             body = {"model": model, "input": texts[i:i + 16]}
             if self._send_dimensions:
-                body["dimensions"] = settings.embed_dim     # text-embedding-3-* can shorten to EMBED_DIM
-            r = self._post(url, body, model, embed=True)
+                body["dimensions"] = settings.embed_dim     # Matryoshka models (Qwen3, text-embedding-3) shorten
+            r = self._post(url, body, model)
             if r.status_code == 400 and "dimensions" in body:
                 self._send_dimensions = False               # model has a fixed size; ingest checks EMBED_DIM
                 body.pop("dimensions")
-                r = self._post(url, body, model, embed=True)
+                r = self._post(url, body, model)
             if r.status_code >= 400:
                 raise ProviderError(f"{self.service} embeddings error {r.status_code}: {r.text[:300]}")
             out.extend(d["embedding"] for d in sorted(self._result(r, "data"), key=lambda d: d["index"]))
@@ -350,7 +351,8 @@ class FoundryProvider(OpenAICompatibleProvider):
     auth_hint = "Check FOUNDRY_API_KEY, or the role assignment if you use Entra ID."
 
     def _configure(self) -> None:
-        self.base = self.embed_base = foundry_base(settings.foundry_endpoint)
+        self.base = foundry_base(settings.foundry_endpoint)
+        self.embed_model = settings.foundry_embed_deployment
         self.timeout = settings.foundry_timeout_s
         self.service = "Microsoft Foundry"
         self._token, self._token_exp = None, 0.0
@@ -358,10 +360,7 @@ class FoundryProvider(OpenAICompatibleProvider):
     def model_label(self, role: Role) -> str:
         return settings.foundry_parse_deployment if role == "parse" else settings.foundry_chat_deployment
 
-    def _embed_model(self) -> str:
-        return settings.foundry_embed_deployment
-
-    def _headers(self, embed: bool = False) -> dict:
+    def _headers(self) -> dict:
         if settings.foundry_auth == "entra":
             if not self._token or time.time() > self._token_exp - 300:
                 try:
@@ -405,23 +404,44 @@ def _hash_embed(text: str, dim: int) -> list[float]:
     return [x / n for x in v]
 
 
-def get_provider() -> Provider:
-    if settings.provider == "bedrock":
+def provider_for(name: str):
+    """The service called `name` (an LLM_PROVIDER / EMBED_PROVIDER value); unknown names mean local Ollama."""
+    if name == "bedrock":
         return BedrockProvider()
-    if settings.provider in ("foundry", "azure"):
+    if name in ("foundry", "azure"):
         return FoundryProvider()
-    if settings.provider in OPENAI_COMPATIBLE:
+    if name in OPENAI_COMPATIBLE:
         return OpenAICompatibleProvider()
-    if settings.provider == "mock":
+    if name == "mock":
         return MockProvider()
     return OllamaProvider()
 
 
+class ModelProvider:
+    """Chat from LLM_PROVIDER, embeddings from the embedding model (which may be another service)."""
+
+    def __init__(self, chat, embedder):
+        self.chat_provider, self.embedder = chat, embedder
+        self.name = chat.name
+
+    def model_label(self, role: Role) -> str:
+        return self.chat_provider.model_label(role)
+
+    def chat(self, system, user, role="rank"):
+        return self.chat_provider.chat(system, user, role)
+
+    def embed(self, texts, kind="document"):
+        return self.embedder.embed(texts, kind)
+
+
+def get_provider() -> Provider:
+    from .embeddings import get_embedder
+    return ModelProvider(provider_for(settings.provider), get_embedder())
+
+
 def embed_model_label() -> str:
-    return {"bedrock": settings.bedrock_embed_model, "mock": "mock-hash",
-            "foundry": settings.foundry_embed_deployment, "azure": settings.foundry_embed_deployment,
-            **dict.fromkeys(OPENAI_COMPATIBLE, settings.llm_embed_model)}.get(
-        settings.provider, settings.ollama_embed_model)
+    from .embeddings import embed_model_label
+    return embed_model_label()
 
 
 def extract_json(text: str) -> dict | None:

@@ -1,7 +1,7 @@
 """End-to-end against a real PostgreSQL + pgvector, with the mock provider (no model needed).
 
 WARNING: wipes and re-seeds the product tables. Runs only when TEST_DATABASE_URL is set:
-    set TEST_DATABASE_URL=postgresql://rag:rag@localhost:5432/kbeauty_test   (Windows)
+    set TEST_DATABASE_URL=postgresql://rag:rag@127.0.0.1:5432/kbeauty_test   (Windows)
 """
 import os
 

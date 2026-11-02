@@ -8,6 +8,7 @@ from datetime import date
 
 from .config import settings
 from .db import fetch_candidates, log_recommendation
+from .embeddings import embed_model_label
 from .models import CONCERN_LABEL, CustomerProfile, RecommendRequest
 from .parsing import merge_profiles, parse_text
 from .providers import Provider, extract_json
@@ -198,7 +199,7 @@ def retrieve(conn, provider: Provider, profile: CustomerProfile, ranking: Rankin
     if len(qvec) != settings.embed_dim:
         raise RuntimeError(f"Embedding size {len(qvec)} != EMBED_DIM {settings.embed_dim}; check your embedding model.")
     return fetch_candidates(
-        conn, qvec=qvec, skin=profile.skin_type, sensitive=profile.sensitive,
+        conn, qvec=qvec, embed_model=embed_model_label(), skin=profile.skin_type, sensitive=profile.sensitive,
         avoid=profile.avoid_flags(), cats=profile.categories,
         pmin=profile.budget_min or 0, pmax=profile.budget_max or NO_LIMIT, k=settings.retrieve_k,
         min_shelf=(ranking or RankingSettings()).min_days_before_expiry,
@@ -222,9 +223,11 @@ def recommend(conn, provider: Provider, req: RecommendRequest) -> dict:
     shortlist = scored[: settings.shortlist_size]
 
     if not shortlist:
-        if conn.execute("SELECT count(*) AS n FROM products WHERE embedding IS NOT NULL").fetchone()["n"] == 0:
+        if conn.execute("SELECT count(*) AS n FROM products WHERE embedding IS NOT NULL AND embedded_with = %s",
+                        (embed_model_label(),)).fetchone()["n"] == 0:
             return {"status": "not_ready", "profile": profile.model_dump(),
-                    "message": "No products have embeddings yet. Run: python -m app.ingest --embed"}
+                    "message": "No products are embedded with the current embedding model yet. "
+                               "Run: python -m app.ingest --embed"}
         return {"status": "no_match", "profile": profile.model_dump(),
                 "message": "No in-stock product matches these conditions. Try a wider budget or category."}
 
