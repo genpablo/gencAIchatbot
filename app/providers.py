@@ -1,10 +1,13 @@
-"""LLM + embedding providers. Switch with LLM_PROVIDER = ollama | bedrock | foundry | mock.
+"""LLM + embedding providers. Switch with LLM_PROVIDER = ollama | bedrock | foundry | openai | openrouter | mock.
 
 - ollama : local testing (e.g. qwen3.5:9b for chat, bge-m3 for embeddings)
 - foundry: production on Microsoft Foundry (Azure), OpenAI-compatible v1 endpoint: GPT, DeepSeek, Llama, Grok ...
            deployments; API key or Microsoft Entra ID
 - bedrock: production on Amazon Bedrock (Claude / Qwen / DeepSeek via the Converse API,
            Cohere Embed v4 or Titan V2 for embeddings)
+- openai : any third-party service with an OpenAI-compatible API (OpenAI, Together, Groq, vLLM, LM Studio ...);
+           embeddings can come from a different service than chat
+- openrouter: the same, with OpenRouter's URL as the default
 - mock   : no model at all; deterministic hash embeddings, chat returns nothing so the
            recommender uses its rule-based fallback. Useful for CI and DB testing.
 """
@@ -16,6 +19,7 @@ import math
 import re
 import time
 from typing import Literal, Protocol
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -172,7 +176,20 @@ class BedrockProvider:
         return "".join(p.get("text", "") for p in parts)
 
 
-# --------------------------------------------------------------------------- Microsoft Foundry
+# --------------------------------------------------------------------------- OpenAI-compatible services
+OPENROUTER_URL = "https://openrouter.ai/api/v1"
+OPENAI_COMPATIBLE = ("openai", "openrouter")
+
+
+def openai_base(url: str) -> str:
+    """Accepts a base URL or a pasted full endpoint and returns the base, e.g. https://openrouter.ai/api/v1"""
+    u = (url or "").strip().split("?")[0].rstrip("/")
+    if not u:
+        raise ProviderError("LLM_BASE_URL is empty. Use your provider's OpenAI-compatible URL, "
+                            f"e.g. {OPENROUTER_URL}")
+    return re.sub(r"/(chat/completions|embeddings)$", "", u)
+
+
 def foundry_base(endpoint: str) -> str:
     """Accepts what people paste from the portal and returns https://<host>/openai/v1"""
     e = (endpoint or "").strip().rstrip("/")
@@ -192,6 +209,7 @@ REASONING_EFFORT_OFF = ["none", "minimal", "low"]     # lowest first; GPT-5 has 
 
 def relax_chat_options(opts: dict, error: str) -> dict:
     """Optional chat fields minus the ones a 400 error names (softened where possible); none named -> drop all."""
+    error = error.lower()
     named = [k for k in opts if k in error]
     if not named:
         return {}
@@ -200,27 +218,150 @@ def relax_chat_options(opts: dict, error: str) -> dict:
         v = out.pop(k)
         if k == "max_tokens" and "max_completion_tokens" in error:
             out["max_completion_tokens"] = v                       # reasoning models renamed the limit
+        elif k == "reasoning" and v["effort"] != REASONING_EFFORT_OFF[-1]:
+            out[k] = {"effort": REASONING_EFFORT_OFF[-1]}          # model must think: keep it as short as possible
         elif (k == "reasoning_effort" and v in REASONING_EFFORT_OFF[:-1]
               and re.search(rf"\b{v}\b", error.replace(k, ""))):
             out[k] = REASONING_EFFORT_OFF[REASONING_EFFORT_OFF.index(v) + 1]   # the value, not the field, was rejected
     return out
 
 
-class FoundryProvider:
-    name = "foundry"
+class OpenAICompatibleProvider:
+    """Any service with OpenAI-style /chat/completions and /embeddings: OpenRouter, OpenAI, Together, vLLM ..."""
+    name = "openai"
+    endpoint_var = "LLM_BASE_URL"
+    auth_hint = "Check LLM_API_KEY."
 
     def __init__(self, client: httpx.Client | None = None, sleep=time.sleep):
-        self.base = foundry_base(settings.foundry_endpoint)
-        self.client = client or httpx.Client(timeout=settings.foundry_timeout_s)
+        self._configure()
+        self.client = client or httpx.Client(timeout=self.timeout)
         self.sleep = sleep
-        self._token, self._token_exp = None, 0.0
         self._send_dimensions = True
-        self._chat_opts: dict[str, dict] = {}       # per deployment: the optional chat fields it accepted
+        self._chat_opts: dict[str, dict] = {}       # per model: the optional chat fields it accepted
+
+    def _configure(self) -> None:
+        self.base = openai_base(settings.llm_base_url or (OPENROUTER_URL if settings.provider == "openrouter" else ""))
+        self.embed_base = openai_base(settings.llm_embed_base_url or self.base)
+        self.timeout = settings.llm_timeout_s
+        self.service = urlsplit(self.base).hostname or self.base
+
+    def model_label(self, role: Role) -> str:
+        return settings.llm_parse_model if role == "parse" else settings.llm_chat_model
+
+    def _embed_model(self) -> str:
+        return settings.llm_embed_model
+
+    def _headers(self, embed: bool = False) -> dict:
+        # A separate embedding service never receives the chat key.
+        key = settings.llm_embed_api_key if embed and settings.llm_embed_base_url else settings.llm_api_key
+        return {"Authorization": f"Bearer {key}"} if key else {}      # local servers need no key
+
+    def _not_found(self, model: str) -> str:
+        return f"Model '{model}' was not found at {self.service}. Check the model id and {self.endpoint_var}."
+
+    def _thinking_off(self) -> dict:
+        if "openrouter.ai" in self.base:
+            return {"reasoning": {"effort": "none"}}                 # OpenRouter's one field for every model
+        return {"reasoning_effort": REASONING_EFFORT_OFF[0],         # GPT-5+ / GPT Luna / o-series
+                "thinking": {"type": "disabled"}}                    # DeepSeek V3.1+ / Flash
+
+    def _post(self, url: str, body: dict, model: str, embed: bool = False) -> httpx.Response:
+        for attempt in range(4):
+            try:
+                r = self.client.post(url, json=body, headers=self._headers(embed))
+            except httpx.ConnectError as e:
+                raise ProviderError(f"Cannot reach {self.service} at {url}. Check {self.endpoint_var} and the network.") from e
+            except httpx.TimeoutException as e:
+                raise ProviderError(f"{self.service} timed out after {self.timeout}s.") from e
+            if (r.status_code in (408, 429) or r.status_code >= 500) and attempt < 3:
+                wait = r.headers.get("retry-after-ms") or r.headers.get("retry-after")
+                try:
+                    secs = float(wait) / (1000 if "retry-after-ms" in r.headers else 1)
+                except (TypeError, ValueError):
+                    secs = 2 ** attempt
+                self.sleep(min(max(secs, 0.5), 20))          # rate limit or temporary error: wait and retry
+                continue
+            break
+        if r.status_code in (401, 403):
+            raise ProviderError(f"{self.service} rejected the credentials ({r.status_code}). {self.auth_hint} {r.text[:300]}")
+        if r.status_code == 402:
+            raise ProviderError(f"{self.service} reports no credits left on this account or key (402).")
+        if r.status_code == 404:
+            raise ProviderError(self._not_found(model))
+        if r.status_code == 429:
+            raise ProviderError(f"{self.service} rate limit reached; try again shortly or raise the quota.")
+        return r
+
+    def _result(self, r: httpx.Response, field: str):
+        """The reply's `field`. Gateways such as OpenRouter can answer 200 with only an error in the body."""
+        try:
+            data = r.json()
+        except ValueError as e:
+            raise ProviderError(f"{self.service} returned something that is not JSON: {r.text[:300]}") from e
+        if not isinstance(data, dict) or not data.get(field):
+            detail = data.get("error") or data if isinstance(data, dict) else data
+            raise ProviderError(f"{self.service} returned no result: {str(detail)[:300]}")
+        return data[field]
+
+    def embed(self, texts, kind="document"):
+        model, out = self._embed_model(), []
+        if not model:
+            raise ProviderError(f"No embedding model is set for {self.service}; check the model settings in .env.")
+        url = f"{self.embed_base}/embeddings"
+        for i in range(0, len(texts), 16):
+            body = {"model": model, "input": texts[i:i + 16]}
+            if self._send_dimensions:
+                body["dimensions"] = settings.embed_dim     # text-embedding-3-* can shorten to EMBED_DIM
+            r = self._post(url, body, model, embed=True)
+            if r.status_code == 400 and "dimensions" in body:
+                self._send_dimensions = False               # model has a fixed size; ingest checks EMBED_DIM
+                body.pop("dimensions")
+                r = self._post(url, body, model, embed=True)
+            if r.status_code >= 400:
+                raise ProviderError(f"{self.service} embeddings error {r.status_code}: {r.text[:300]}")
+            out.extend(d["embedding"] for d in sorted(self._result(r, "data"), key=lambda d: d["index"]))
+        return out
+
+    def chat(self, system, user, role="rank"):
+        model = self.model_label(role)
+        if not model:
+            raise ProviderError(f"No chat model is set for {self.service}; check the model settings in .env.")
+        msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        opts = self._chat_opts.get(model)
+        if opts is None:
+            opts = {"temperature": 0.2, "max_tokens": 1500, "response_format": {"type": "json_object"}}
+            if settings.disable_thinking:
+                opts.update(self._thinking_off())
+        for _ in range(8):
+            r = self._post(f"{self.base}/chat/completions", {"model": model, "messages": msgs, **opts}, model)
+            if r.status_code != 400 or not opts or "content_filter" in r.text:
+                break
+            opts = relax_chat_options(opts, r.text)     # the model rejected a field: drop or soften it
+        if r.status_code >= 400:
+            raise ProviderError(f"{self.service} chat error {r.status_code}: {r.text[:300]}")
+        choices = self._result(r, "choices")
+        self._chat_opts[model] = opts
+        return choices[0]["message"].get("content") or ""
+
+
+class FoundryProvider(OpenAICompatibleProvider):
+    name = "foundry"
+    endpoint_var = "FOUNDRY_ENDPOINT"
+    auth_hint = "Check FOUNDRY_API_KEY, or the role assignment if you use Entra ID."
+
+    def _configure(self) -> None:
+        self.base = self.embed_base = foundry_base(settings.foundry_endpoint)
+        self.timeout = settings.foundry_timeout_s
+        self.service = "Microsoft Foundry"
+        self._token, self._token_exp = None, 0.0
 
     def model_label(self, role: Role) -> str:
         return settings.foundry_parse_deployment if role == "parse" else settings.foundry_chat_deployment
 
-    def _headers(self) -> dict:
+    def _embed_model(self) -> str:
+        return settings.foundry_embed_deployment
+
+    def _headers(self, embed: bool = False) -> dict:
         if settings.foundry_auth == "entra":
             if not self._token or time.time() > self._token_exp - 300:
                 try:
@@ -234,68 +375,9 @@ class FoundryProvider:
             raise ProviderError("FOUNDRY_API_KEY is empty. Copy a key from the Foundry portal, or set FOUNDRY_AUTH=entra.")
         return {"api-key": settings.foundry_api_key}
 
-    def _post(self, path: str, body: dict, deployment: str) -> httpx.Response:
-        for attempt in range(4):
-            try:
-                r = self.client.post(self.base + path, json=body, headers=self._headers())
-            except httpx.ConnectError as e:
-                raise ProviderError(f"Cannot reach Microsoft Foundry at {self.base}. Check FOUNDRY_ENDPOINT and the network.") from e
-            except httpx.TimeoutException as e:
-                raise ProviderError(f"Microsoft Foundry timed out after {settings.foundry_timeout_s}s.") from e
-            if (r.status_code == 429 or r.status_code >= 500) and attempt < 3:
-                wait = r.headers.get("retry-after-ms") or r.headers.get("retry-after")
-                try:
-                    secs = float(wait) / (1000 if "retry-after-ms" in r.headers else 1)
-                except (TypeError, ValueError):
-                    secs = 2 ** attempt
-                self.sleep(min(max(secs, 0.5), 20))          # rate limit or temporary error: wait and retry
-                continue
-            break
-        if r.status_code in (401, 403):
-            raise ProviderError("Microsoft Foundry rejected the credentials (" + str(r.status_code) + "). "
-                                "Check FOUNDRY_API_KEY, or the role assignment if you use Entra ID.")
-        if r.status_code == 404:
-            raise ProviderError(f"Foundry deployment '{deployment}' was not found. Use the deployment name from the "
-                                "Foundry portal (case-sensitive) and check FOUNDRY_ENDPOINT.")
-        if r.status_code == 429:
-            raise ProviderError("Microsoft Foundry rate limit reached; try again shortly or raise the deployment quota.")
-        return r
-
-    def embed(self, texts, kind="document"):
-        dep, out = settings.foundry_embed_deployment, []
-        for i in range(0, len(texts), 16):
-            body = {"model": dep, "input": texts[i:i + 16]}
-            if self._send_dimensions:
-                body["dimensions"] = settings.embed_dim     # text-embedding-3-* can shorten to EMBED_DIM
-            r = self._post("/embeddings", body, dep)
-            if r.status_code == 400 and "dimensions" in body:
-                self._send_dimensions = False               # model has a fixed size; ingest checks EMBED_DIM
-                body.pop("dimensions")
-                r = self._post("/embeddings", body, dep)
-            if r.status_code >= 400:
-                raise ProviderError(f"Foundry embeddings error {r.status_code}: {r.text[:300]}")
-            out.extend(d["embedding"] for d in sorted(r.json()["data"], key=lambda d: d["index"]))
-        return out
-
-    def chat(self, system, user, role="rank"):
-        dep = self.model_label(role)
-        msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-        opts = self._chat_opts.get(dep)
-        if opts is None:
-            opts = {"temperature": 0.2, "max_tokens": 1500, "response_format": {"type": "json_object"}}
-            if settings.disable_thinking:
-                opts["reasoning_effort"] = REASONING_EFFORT_OFF[0]   # GPT-5+ / GPT Luna / o-series
-                opts["thinking"] = {"type": "disabled"}              # DeepSeek V3.1+ / Flash
-        for _ in range(8):
-            r = self._post("/chat/completions", {"model": dep, "messages": msgs, **opts}, dep)
-            if r.status_code != 400 or not opts or "content_filter" in r.text:
-                break
-            opts = relax_chat_options(opts, r.text)     # the deployment rejected a field: drop or soften it
-        if r.status_code >= 400:
-            raise ProviderError(f"Foundry chat error {r.status_code}: {r.text[:300]}")
-        self._chat_opts[dep] = opts
-        msg = r.json()["choices"][0]["message"]
-        return msg.get("content") or ""
+    def _not_found(self, model: str) -> str:
+        return (f"Foundry deployment '{model}' was not found. Use the deployment name from the "
+                "Foundry portal (case-sensitive) and check FOUNDRY_ENDPOINT.")
 
 
 # --------------------------------------------------------------------------- Mock (no model)
@@ -328,6 +410,8 @@ def get_provider() -> Provider:
         return BedrockProvider()
     if settings.provider in ("foundry", "azure"):
         return FoundryProvider()
+    if settings.provider in OPENAI_COMPATIBLE:
+        return OpenAICompatibleProvider()
     if settings.provider == "mock":
         return MockProvider()
     return OllamaProvider()
@@ -335,7 +419,8 @@ def get_provider() -> Provider:
 
 def embed_model_label() -> str:
     return {"bedrock": settings.bedrock_embed_model, "mock": "mock-hash",
-            "foundry": settings.foundry_embed_deployment, "azure": settings.foundry_embed_deployment}.get(
+            "foundry": settings.foundry_embed_deployment, "azure": settings.foundry_embed_deployment,
+            **dict.fromkeys(OPENAI_COMPATIBLE, settings.llm_embed_model)}.get(
         settings.provider, settings.ollama_embed_model)
 
 

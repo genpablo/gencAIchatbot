@@ -252,3 +252,97 @@ def test_foundry_embeddings_batches_dimensions_and_order(monkeypatch):
     vecs = p.embed([f"t{i}" for i in range(20)])
     assert len(vecs) == 20 and vecs[0][0] == 0.0 and vecs[15][0] == 15.0 and vecs[16][0] == 0.0
     assert bodies[0]["dimensions"] == 4 and all("dimensions" not in b for b in bodies[1:])
+
+
+# ------------------------------------------------------------------ OpenAI-compatible services
+def _compatible(handler, monkeypatch, **env):
+    from app import providers
+    from app.config import settings
+    vals = {"provider": "openai", "llm_base_url": "https://api.example.com/v1/chat/completions/", "llm_api_key": "sk-chat",
+            "llm_chat_model": "vendor/chat", "llm_parse_model": "vendor/parse", "llm_embed_model": "vendor/embed",
+            "llm_embed_base_url": "", "llm_embed_api_key": "", "embed_dim": 4, **env}
+    import dataclasses
+    monkeypatch.setattr(providers, "settings", dataclasses.replace(settings, **vals))
+    return providers.OpenAICompatibleProvider(client=httpx.Client(transport=httpx.MockTransport(handler)),
+                                              sleep=lambda s: None)
+
+
+def _chat_reply(req):
+    return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
+
+
+def test_get_provider_selects_compatible_and_defaults_to_openrouter_url(monkeypatch):
+    from app import providers
+    p = _compatible(_chat_reply, monkeypatch, provider="openrouter", llm_base_url="")
+    assert p.base == "https://openrouter.ai/api/v1" and isinstance(providers.get_provider(), providers.OpenAICompatibleProvider)
+    assert providers.embed_model_label() == "vendor/embed"
+    with pytest.raises(providers.ProviderError, match="LLM_BASE_URL is empty"):
+        _compatible(_chat_reply, monkeypatch, llm_base_url="")
+
+
+def test_compatible_uses_bearer_key_and_role_models(monkeypatch):
+    seen = []
+
+    def handler(req):
+        seen.append((str(req.url), req.headers.get("authorization"), json.loads(req.content)))
+        return _chat_reply(req)
+
+    p = _compatible(handler, monkeypatch)
+    p.chat("s", "u", role="parse")
+    assert seen[0][0] == "https://api.example.com/v1/chat/completions" and seen[0][1] == "Bearer sk-chat"
+    assert seen[0][2]["model"] == "vendor/parse"
+    assert "thinking" in seen[0][2] and "reasoning" not in seen[0][2]
+    seen.clear()
+    _compatible(handler, monkeypatch, llm_api_key="").chat("s", "u")
+    assert seen[0][1] is None and seen[0][2]["model"] == "vendor/chat"          # local server without a key
+
+
+def test_openrouter_thinking_off_softens_when_reasoning_is_mandatory(monkeypatch):
+    seen = []
+
+    def handler(req):
+        b = json.loads(req.content)
+        seen.append(b)
+        if b["reasoning"]["effort"] == "none":
+            return httpx.Response(400, json={"error": {"code": 400, "message": "Reasoning is mandatory for this endpoint"}})
+        return _chat_reply(req)
+
+    p = _compatible(handler, monkeypatch, llm_base_url="https://openrouter.ai/api/v1")
+    p.chat("s", "u")
+    assert seen[0]["reasoning"] == {"effort": "none"} and "reasoning_effort" not in seen[0] and "thinking" not in seen[0]
+    assert seen[1]["reasoning"] == {"effort": "low"} and seen[1]["temperature"] == 0.2
+    p.chat("s", "u")
+    assert len(seen) == 3
+
+
+def test_embeddings_can_use_another_service_without_the_chat_key(monkeypatch):
+    seen = []
+
+    def handler(req):
+        seen.append((str(req.url), req.headers.get("authorization")))
+        return httpx.Response(200, json={"data": [{"index": 0, "embedding": [0.0] * 4}]})
+
+    _compatible(handler, monkeypatch, llm_embed_base_url="http://localhost:11434/v1").embed(["x"])
+    assert seen == [("http://localhost:11434/v1/embeddings", None)]
+    seen.clear()
+    _compatible(handler, monkeypatch).embed(["x"])
+    assert seen == [("https://api.example.com/v1/embeddings", "Bearer sk-chat")]
+
+
+def test_compatible_errors_are_explained(monkeypatch):
+    from app.providers import ProviderError
+    in_body = httpx.Response(200, json={"error": {"code": 502, "message": "upstream died"}})
+    with pytest.raises(ProviderError, match="upstream died"):
+        _compatible(lambda r: in_body, monkeypatch).chat("s", "u")
+    with pytest.raises(ProviderError, match="not JSON"):
+        _compatible(lambda r: httpx.Response(200, text="<html>"), monkeypatch).chat("s", "u")
+    with pytest.raises(ProviderError, match="no credits"):
+        _compatible(lambda r: httpx.Response(402), monkeypatch).chat("s", "u")
+    with pytest.raises(ProviderError, match="Model 'vendor/chat' was not found"):
+        _compatible(lambda r: httpx.Response(404), monkeypatch).chat("s", "u")
+    with pytest.raises(ProviderError, match="rejected the credentials.*LLM_API_KEY"):
+        _compatible(lambda r: httpx.Response(401), monkeypatch).chat("s", "u")
+    with pytest.raises(ProviderError, match="No chat model"):
+        _compatible(_chat_reply, monkeypatch, llm_chat_model="").chat("s", "u")
+    with pytest.raises(ProviderError, match="No embedding model"):
+        _compatible(_chat_reply, monkeypatch, llm_embed_model="").embed(["x"])
