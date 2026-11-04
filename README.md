@@ -148,7 +148,7 @@ already has this column). If a product has no URL on file, the link is a shop se
 
 **Add it to the BigCommerce shop (gencbeauty.com)** as a chat bubble on every page:
 
-1. The app must be reachable over HTTPS (e.g. the Azure Container Apps URL, section 9). The shop is HTTPS, so
+1. The app must be reachable over HTTPS (e.g. your deployment URL, section 9). The shop is HTTPS, so
    browsers block a plain-HTTP frame.
 2. BigCommerce admin > **Storefront > Script Manager > Create a Script**. Placement **Footer**, location **All pages**,
    category **Functional**, type **Script**, and paste (Admin > Customer assistant shows it with your address):
@@ -340,27 +340,6 @@ from staff appear in Activity.
 for real use put it behind HTTPS: a reverse proxy (Caddy, nginx, IIS) with a certificate, or a cloud host
 (Azure App Service / Container Apps, AWS App Runner / ECS). Sessions use HTTP-only cookies and are marked
 secure automatically behind HTTPS.
-
-### Azure Container Apps
-
-Production runs as one container (`Dockerfile`) in Azure Container Apps, with Azure Database for
-PostgreSQL (Flexible Server, `vector` extension allowed) and Microsoft Foundry (`gpt-4.1-mini` for chat,
-`text-embedding-3-large` at 1024-d). The app reaches Foundry with its user-assigned managed identity
-(`FOUNDRY_AUTH=entra`, role *Cognitive Services OpenAI User*), so no API key is stored. `DATABASE_URL`,
-`ADMIN_PASSWORD` and `SECRET_KEY` are Container App secrets. Each container start runs
-`python -m app.ingest --init`, so schema changes apply on deploy; product embeddings are created by the
-admin Excel import.
-
-To deploy the current checkout (needs Docker Desktop and `az login`):
-
-```bash
-bash scripts/deploy-azure.sh
-```
-
-Account settings live in `.local/azure.env` and secrets in `.local/azure-secrets.env` (both git-ignored);
-`--config` re-applies secrets and environment variables. Azure for Students limits apply: only five
-regions are allowed, one standard Container Apps environment per subscription (this app uses an Express
-environment), and ACR Tasks are blocked, so the image is built locally.
 
 ## 10. Tests
 
