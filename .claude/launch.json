@@ -1,0 +1,55 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "kbeauty-app",
+      "runtimeExecutable": ".venv\\Scripts\\python.exe",
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000"
+      ],
+      "port": 8000
+    },
+    {
+      "name": "assistant-preview",
+      "runtimeExecutable": ".venv\\Scripts\\python.exe",
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8010"
+      ],
+      "port": 8010,
+      "env": {
+        "DATABASE_URL": "postgresql://rag:rag@127.0.0.1:5432/kbeauty_test",
+        "LLM_PROVIDER": "mock",
+        "EMBED_PROVIDER": "mock",
+        "ADMIN_PASSWORD": "test-pass",
+        "SECRET_KEY": "preview-secret",
+        "SHOP_EMBED_ORIGINS": "https://gencbeauty.com https://*.mybigcommerce.com http://localhost:8011"
+      }
+    },
+    {
+      "name": "mock-shop",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8011",
+        "--bind",
+        "127.0.0.1",
+        "--directory",
+        "C:\\Users\\CD035\\AppData\\Local\\Temp\\claude\\C--RAG-kbeauty-recommender\\331f53ed-7150-460b-8616-6da804b07cbb\\scratchpad\\mockshop"
+      ],
+      "port": 8011
+    }
+  ]
+}
