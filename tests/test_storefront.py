@@ -60,6 +60,22 @@ def test_customer_prompts_format():
     assert '{"answer": "..."}' in v["qa"] and "in store" in v["unknown"]
 
 
+def test_customer_answers_explain_why_within_400_words():
+    v = voice("online")
+    assert v["max_words"] == 400 and "under 400 words" in v["open"] and "WHY" in v["open"]
+
+
+def test_fit_words_cuts_at_a_sentence():
+    from app.chat import fit_words, word_count
+    text = "Dry skin needs layers of hydration. Look for ceramides and hyaluronic acid. Avoid harsh foaming cleansers."
+    assert fit_words(text, 50) == text
+    assert fit_words(text, 14) == "Dry skin needs layers of hydration. Look for ceramides and hyaluronic acid."
+    assert fit_words(text, 3) == "Dry skin needs..."
+    assert fit_words("Intro line\n- point one is long here", 4) == "Intro line"
+    long = " ".join(["Ceramides help repair the skin barrier."] * 120)
+    assert word_count(fit_words(long, 400)) <= 400
+
+
 def test_import_reads_product_urls():
     p = read_table("p.xlsx", xlsx([("A-1", "Serum", 10, "https://gencbeauty.com/serum/"), ("A-2", "Toner", 9, "gencbeauty.com/toner")],
                                   headers=("SKU", "Name", "Price", "Product URL")))
