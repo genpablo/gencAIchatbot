@@ -68,6 +68,23 @@ CATEGORY_PLURAL = {"cleanser": "cleansers", "toner": "toners", "essence": "essen
                    "cream": "moisturizers", "sunscreen": "sunscreens", "mask": "masks", "other": "other products"}
 
 
+def word_count(text: str) -> int:
+    return len(re.findall(r"\S+", text or ""))
+
+
+def fit_words(text: str, limit: int) -> str:
+    """At most `limit` words, cut at the last full sentence (or line) that fits; mid-sentence with "..." only
+    when not even the first sentence fits. Line breaks and markdown are kept."""
+    words = list(re.finditer(r"\S+", text or ""))
+    if len(words) <= limit:
+        return text
+    if limit <= 0:
+        return ""
+    head = text[:words[limit - 1].end()]
+    ends = [m.end() for m in re.finditer(r"[.!?][)\"'*]*(?=\s|$)|\n", head)]
+    return head[:ends[-1]].rstrip() if ends else head.rstrip(" ,;:-") + "..."
+
+
 # ------------------------------------------------------------------ helpers
 def money(v) -> str:
     try:
@@ -400,6 +417,8 @@ def open_answer(conn, provider, user: dict, ranking, kept: CustomerProfile, turn
     rows = product_facts(conn, list(dict.fromkeys(mentioned + [c["sku"] for c in eligible[:6]])))
     facts = {r["sku"]: r for r in rows}
 
+    max_words = voice.get("max_words")              # customer voice: longer "why" per product, capped in total
+    text_chars, reason_chars = (max_words * 8, max_words * 4) if max_words else (1500, 300)
     text, picks, used_llm = None, [], False
     if ranking.use_llm_rerank and provider is not None and rows:
         who = describe(turn)
@@ -407,11 +426,11 @@ def open_answer(conn, provider, user: dict, ranking, kept: CustomerProfile, turn
             data = extract_json(provider.chat(
                 voice["open"], f"Question: {message}\n" + (f"Customer: {who}\n" if who else "")
                 + "\nCatalog facts (one JSON per line):\n" + _facts_for_llm(rows, set(by_sku)), role="rank")) or {}
-            text = sanitize(str(data.get("answer") or ""), 1500) or None
+            text = sanitize(str(data.get("answer") or ""), text_chars) or None
             for o in data.get("recommend") or []:
                 sku = str(o.get("sku", "")).strip() if isinstance(o, dict) else ""
                 if sku in by_sku and sku in facts and sku not in [p[0] for p in picks] and len(picks) < 3:
-                    picks.append((sku, sanitize(str(o.get("reason") or ""))))
+                    picks.append((sku, sanitize(str(o.get("reason") or ""), reason_chars)))
             used_llm = bool(text)
         except Exception as e:                        # model down: answer from the facts
             log.warning("open question fell back to rules: %s", e)
@@ -426,6 +445,10 @@ def open_answer(conn, provider, user: dict, ranking, kept: CustomerProfile, turn
             picks.append((c["sku"], ""))
 
     cards = [{**product_card(facts[s]), "reason": r or template_reason(by_sku[s], turn)} for s, r in picks]
+    if max_words:                                     # no reason takes more than a quarter; the answer gets the rest
+        for c in cards:
+            c["reason"] = fit_words(c["reason"], max_words // 4)
+        text = fit_words(text, max_words - sum(word_count(c["reason"]) for c in cards))
     log_id = None
     if cards:
         text += "\n\n" + voice["lead"]
