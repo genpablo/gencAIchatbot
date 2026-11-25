@@ -5,7 +5,7 @@
   /widget.js  chat bubble that shows /shop on every BigCommerce page (Storefront > Script Manager)
   /store    customer assistant for screens in the store (no login; product links off by default)
   /admin   admin portal (ADMIN_PASSWORD)
-  /docs     API documentation
+  /docs     API documentation (only with API_DOCS=true; off by default so the API is not advertised)
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from .models import FeedbackRequest, RecommendRequest
 from .embeddings import embed_model_label, embed_provider
 from .providers import ProviderError, get_provider
 from .recommender import recommend
-from .security import HOW_TO_FIX, BodyLimit, admin_password_problem, secret_key_problem
+from .security import HOW_TO_FIX, BodyLimit, admin_password_problem, is_https, secret_key_problem
 
 log = logging.getLogger("main")
 
@@ -44,7 +44,8 @@ async def lifespan(_app):
     yield
 
 
-app = FastAPI(title="K-Beauty Product Recommender", version="0.5.0", lifespan=lifespan)
+DOCS = {} if settings.api_docs else {"docs_url": None, "redoc_url": None, "openapi_url": None}
+app = FastAPI(title="K-Beauty Product Recommender", version="0.5.0", lifespan=lifespan, **DOCS)
 app.add_middleware(BodyLimit)
 provider = get_provider()
 STATIC = Path(__file__).parent / "static"
@@ -60,14 +61,32 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 NO_CACHE = {"Cache-Control": "no-cache"}
 
 
+# What the pages may load: their own scripts and styles (inline included), Google Fonts, photos and the logo
+# from any HTTPS address, and API calls to this app only. A script someone managed to inject could not
+# send data anywhere else.
+PAGE_POLICY = ("default-src 'self'; script-src 'self' 'unsafe-inline'; "
+               "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; "
+               "img-src 'self' data: https:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'")
+DOC_PAGES = ("/docs", "/redoc")                       # Swagger loads its scripts from a CDN (only with API_DOCS)
+
+
 @app.middleware("http")
-async def frame_policy(request: Request, call_next):
-    """Only the online shop may show /shop in a frame (the chat bubble); no other site may frame any page."""
+async def security_headers(request: Request, call_next):
+    """Only the online shop may show /shop in a frame (the chat bubble); no other site may frame any page.
+    Plus the usual browser protections on every response."""
     response = await call_next(request)
+    path = request.url.path
     ancestors = "'self'"
-    if request.url.path == "/shop":
+    if path == "/shop":
         ancestors += " " + " ".join(settings.shop_embed_origins.split())
-    response.headers.setdefault("Content-Security-Policy", f"frame-ancestors {ancestors}")
+    policy = f"frame-ancestors {ancestors}" if path.startswith(DOC_PAGES) else f"{PAGE_POLICY}; frame-ancestors {ancestors}"
+    h = response.headers
+    h.setdefault("Content-Security-Policy", policy)
+    h.setdefault("X-Content-Type-Options", "nosniff")
+    h.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    h.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
+    if is_https(request):
+        h.setdefault("Strict-Transport-Security", "max-age=31536000")
     return response
 
 
@@ -105,11 +124,17 @@ def admin_ui():
 
 
 @app.get("/health")
-def health():
+def health(request: Request):
+    """Up and the database reachable: {"ok": true} for anyone (load balancers, uptime checks). Which AI models
+    the app uses and how many products are searchable is shown only to a manager signed in to the admin portal."""
     with connect() as conn:
         n = conn.execute("SELECT count(embedded_with = %(m)s OR NULL) AS current, "
                          "count(embedded_with IS DISTINCT FROM %(m)s OR NULL) AS other "
                          "FROM products WHERE embedding IS NOT NULL", {"m": embed_model_label()}).fetchone()
+    try:
+        admin.require_admin(request)
+    except HTTPException:
+        return {"ok": True}
     return {"ok": True, "provider": settings.provider, "chat_model": provider.model_label("rank"),
             "embed_provider": embed_provider(), "embed_model": embed_model_label(),
             "embedded_products": n["current"], "other_model_products": n["other"]}

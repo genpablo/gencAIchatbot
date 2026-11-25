@@ -100,7 +100,8 @@ def create_user(conn, username: str, display_name: str, password: str, role: str
         (username, display_name.strip() or username, hash_password(password), role, must_change, created_by)).fetchone()
 
 
-def require_staff(request: Request) -> dict:
+def current_staff(request: Request) -> dict:
+    """Any signed-in staff member, also one who still has a temporary password (to see who they are and change it)."""
     parsed = read_staff_token(request.cookies.get(STAFF_COOKIE))
     if not parsed:
         raise HTTPException(401, "Please sign in.")
@@ -108,6 +109,15 @@ def require_staff(request: Request) -> dict:
         user = conn.execute(f"SELECT {USER_COLS} FROM staff_users WHERE id = %s", (parsed[0],)).fetchone()
     if not user or not user["is_active"] or user["session_version"] != parsed[1]:
         raise HTTPException(401, "Your session has ended. Please sign in again.")
+    return user
+
+
+def require_staff(request: Request) -> dict:
+    """A signed-in staff member who has chosen their own password: a temporary one (shown to a manager, maybe
+    written down) only opens the password change, not the chat or the API."""
+    user = current_staff(request)
+    if user["must_change_password"]:
+        raise HTTPException(403, "Please choose your own password first.")
     return user
 
 
@@ -153,7 +163,7 @@ def logout(response: Response):
 
 
 @router.get("/me")
-def me(user: dict = Depends(require_staff)):
+def me(user: dict = Depends(current_staff)):
     return {"user": public_user(user), "brand": {"logo_url": settings.brand_logo_url, "name": settings.brand_name},
             "currency": settings.currency}
 
@@ -164,7 +174,7 @@ class PasswordBody(BaseModel):
 
 
 @router.post("/password")
-def change_password(body: PasswordBody, request: Request, response: Response, user: dict = Depends(require_staff)):
+def change_password(body: PasswordBody, request: Request, response: Response, user: dict = Depends(current_staff)):
     check_new_password(body.new)
     with connect() as conn:
         row = conn.execute("SELECT password_hash FROM staff_users WHERE id = %s", (user["id"],)).fetchone()

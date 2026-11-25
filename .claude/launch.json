@@ -29,12 +29,12 @@
       ],
       "port": 8010,
       "env": {
-        "DATABASE_URL": "postgresql://rag:rag@127.0.0.1:5432/kbeauty_test",
+        "DATABASE_URL": "postgresql://rag:rag@127.0.0.1:55432/kbeauty_test",
         "LLM_PROVIDER": "mock",
         "EMBED_PROVIDER": "mock",
-        "ADMIN_PASSWORD": "test-pass",
-        "SECRET_KEY": "preview-secret",
-        "SHOP_EMBED_ORIGINS": "https://gencbeauty.com https://*.mybigcommerce.com http://localhost:8011"
+        "ADMIN_PASSWORD": "preview-admin-pass",
+        "SECRET_KEY": "preview-secret-key-for-local-testing-only-0123",
+        "SHOP_EMBED_ORIGINS": "https://gencbeauty.com http://localhost:8011"
       }
     },
     {

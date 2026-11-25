@@ -217,9 +217,11 @@ def test_chips_set_in_the_admin_portal_reach_customers(client):
 @DB
 def test_only_the_shop_may_frame_the_online_assistant(client):
     shop = client.get("/shop").headers["content-security-policy"]
-    assert shop.startswith("frame-ancestors 'self' ") and "https://gencbeauty.com" in shop and "mybigcommerce.com" in shop
+    assert shop.endswith("frame-ancestors 'self' https://gencbeauty.com https://www.gencbeauty.com "
+                         "https://store-kzkmuqjqk9.mybigcommerce.com")
+    assert "*.mybigcommerce.com" not in shop                      # not every BigCommerce store
     for path in ("/", "/admin", "/store"):
-        assert client.get(path).headers["content-security-policy"] == "frame-ancestors 'self'"
+        assert client.get(path).headers["content-security-policy"].endswith("; frame-ancestors 'self'")
     w = client.get("/widget.js")
     assert w.status_code == 200 and "javascript" in w.headers["content-type"] and "/shop?embed=1" in w.text
 

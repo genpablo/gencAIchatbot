@@ -12,7 +12,7 @@ shortlist that already passed the safety, stock, expiry and budget rules.
 | `/widget.js` | gencbeauty.com (BigCommerce Script Manager) | Chat bubble that opens `/shop` on every shop page |
 | `/store` | Shoppers in the store (no login) | The same assistant for an in-store tablet or kiosk; product links off by default |
 | `/admin` | Managers (`ADMIN_PASSWORD`) | Ranking strategy, Excel product import, products & campaigns, staff accounts, analytics |
-| `/docs` | Developers | API documentation |
+| `/docs` | Developers | API documentation, only when `API_DOCS=true` (off by default) |
 
 ```
 staff message ─> chat (app/chat.py): remembers the customer, follow-ups, product questions
@@ -163,8 +163,8 @@ already has this column). If a product has no URL on file, the link is a shop se
 
 The bubble opens `/shop?embed=1` in a frame. It loads only when a customer first opens it, and is full screen on
 phones. Product links open in the shop window, and the chat keeps its messages as the customer moves between shop
-pages in the same tab. Only the sites in `SHOP_EMBED_ORIGINS` (default gencbeauty.com, www.gencbeauty.com and
-*.mybigcommerce.com) may frame `/shop`; no other site may frame any page of this app. To give the chat its own
+pages in the same tab. Only the sites in `SHOP_EMBED_ORIGINS` (default gencbeauty.com, www.gencbeauty.com and the
+store's own store-kzkmuqjqk9.mybigcommerce.com address) may frame `/shop`; no other site may frame any page of this app. To give the chat its own
 shop page instead, create a BigCommerce web page and paste the iframe snippet from the admin tab in its HTML editor.
 In store, nothing is kept for the next shopper.
 
@@ -309,7 +309,7 @@ set `EMBED_QUERY_PREFIX` / `EMBED_DOCUMENT_PREFIX` for other models.
 Every product vector records the model that made it. After changing the embedding model, run
 `python -m app.ingest --embed` (or *Retry now* in the admin Products tab): it re-embeds every product made
 with another model; until then those products are left out of search, never mixed with the new model's
-queries. `/health` shows `other_model_products` still waiting. Use `--reembed` after changing only the
+queries. `/health` (while signed in to the admin portal) shows `other_model_products` still waiting. Use `--reembed` after changing only the
 prefixes.
 
 ## 6. Analytics

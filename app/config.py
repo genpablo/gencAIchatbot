@@ -103,6 +103,7 @@ class Settings:
     # Too high a number lets visitors choose their own address and escape every rate limit.
     trusted_proxy_hops: int = int(_env("TRUSTED_PROXY_HOPS", "0"))
     max_body_mb: int = int(_env("MAX_BODY_MB", "20"))         # largest request (the Excel import); customer chat: 16 KB
+    api_docs: bool = _env("API_DOCS", "false").lower() == "true"   # /docs, /redoc, /openapi.json (developers only)
 
     # --- Staff chat app (/) ---
     staff_session_days: int = int(_env("STAFF_SESSION_DAYS", "30"))
@@ -114,9 +115,10 @@ class Settings:
     # All visitors together, per day (UTC): caps the AI bill even when many addresses send messages
     public_chat_per_day: int = int(_env("PUBLIC_CHAT_PER_DAY", "3000"))
     # Sites allowed to show /shop in a frame (the BigCommerce chat bubble); space-separated, * wildcards allowed.
-    # No other site may frame any page of this app.
+    # No other site may frame any page of this app. Name our own store's BigCommerce address, not
+    # *.mybigcommerce.com: that would let every BigCommerce store frame the assistant.
     shop_embed_origins: str = _env("SHOP_EMBED_ORIGINS",
-                                   "https://gencbeauty.com https://www.gencbeauty.com https://*.mybigcommerce.com")
+                                   "https://gencbeauty.com https://www.gencbeauty.com https://store-kzkmuqjqk9.mybigcommerce.com")
 
     brand_logo_url: str = _env("BRAND_LOGO_URL", "https://cdn11.bigcommerce.com/s-kzkmuqjqk9/images/stencil/original/download1_1659212301__04676.original.png")
 
