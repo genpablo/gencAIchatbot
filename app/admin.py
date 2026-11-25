@@ -611,6 +611,14 @@ def analytics(days: int = 30, _: str = Depends(require_admin)):
             "skin_types": skin, "asked_products": asked, "no_match": gaps, "errors": errors}
 
 
+def csv_cell(v):
+    """Text that Excel or Google Sheets would run as a formula (a customer typing =HYPERLINK(...) into the shop
+    chat) gets a leading apostrophe, so it shows as plain text. Numbers and other values are left as they are."""
+    if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + v
+    return v
+
+
 @router.get("/analytics/export.csv")
 def analytics_export(days: int = 90, _: str = Depends(require_admin)):
     import csv
@@ -628,10 +636,11 @@ def analytics_export(days: int = 90, _: str = Depends(require_admin)):
                 "used_ai", "model", "recommendation_id"])
     for r in rows:
         p = r["profile"] or {}
-        w.writerow([r["at"].isoformat(), r["event"], r["username"], r["conversation_id"], r["intent"], r["status"],
-                    (r["message"] or "").replace("\n", " "), p.get("skin_type"), p.get("sensitive"),
-                    ";".join(p.get("concerns") or []), ";".join(p.get("avoid") or []), p.get("age"), p.get("budget_max"),
-                    ";".join(p.get("categories") or []), ";".join(r["skus"] or []), r["result_count"], r["latency_ms"],
-                    r["used_llm"], r["model"], r["log_id"]])
+        w.writerow([csv_cell(v) for v in [
+            r["at"].isoformat(), r["event"], r["username"], r["conversation_id"], r["intent"], r["status"],
+            (r["message"] or "").replace("\n", " "), p.get("skin_type"), p.get("sensitive"),
+            ";".join(p.get("concerns") or []), ";".join(p.get("avoid") or []), p.get("age"), p.get("budget_max"),
+            ";".join(p.get("categories") or []), ";".join(r["skus"] or []), r["result_count"], r["latency_ms"],
+            r["used_llm"], r["model"], r["log_id"]]])
     return Response("﻿" + buf.getvalue(), media_type="text/csv",            # BOM so Excel reads UTF-8
                     headers={"Content-Disposition": f'attachment; filename="recommender-analytics-{days}d.csv"'})

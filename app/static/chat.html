@@ -283,8 +283,9 @@ async function boot() {
     paintBrand(d.brand);
     $("#login").classList.add("hidden"); $("#app").classList.remove("hidden");
     $("#whoName").textContent = ME.display_name; $("#whoUser").textContent = "@" + ME.username; $("#stripUser").textContent = ME.display_name;
-    loadConvs(); newChat();
-    if (ME.must_change_password) openPwd(true);
+    newChat();
+    if (ME.must_change_password) openPwd(true);     // the chat opens once they have their own password
+    else loadConvs();
   } catch (e) { if (e.message !== "Please sign in.") showLogin(e.message); }
 }
 $("#loginForm").onsubmit = async e => {
@@ -305,7 +306,7 @@ $("#pwdCancel").onclick = () => $("#pwdDlg").close();
 $("#pwdDlg").addEventListener("cancel", e => { if (ME?.must_change_password) e.preventDefault(); });
 $("#pwdForm").onsubmit = async e => {
   e.preventDefault();
-  try { const d = await api("/api/password", {method: "POST", body: JSON.stringify({current: $("#pc").value, new: $("#pn").value})}); ME = d.user; $("#pwdDlg").close(); }
+  try { const was = ME?.must_change_password; const d = await api("/api/password", {method: "POST", body: JSON.stringify({current: $("#pc").value, new: $("#pn").value})}); ME = d.user; $("#pwdDlg").close(); if (was) loadConvs(); }
   catch (err) { $("#pwdErr").textContent = err.message; }
 };
 
