@@ -93,9 +93,16 @@ class Settings:
     import_workers: int = int(_env("IMPORT_WORKERS", "6"))    # descriptions the AI reads at once during an import
 
     # --- Admin portal (/admin) ---
-    admin_password: str = _env("ADMIN_PASSWORD", "")          # empty = portal disabled
-    secret_key: str = _env("SECRET_KEY", "")                  # signs the admin login cookie
+    admin_password: str = _env("ADMIN_PASSWORD", "")          # empty = portal disabled; at least 12 characters
+    secret_key: str = _env("SECRET_KEY", "")                  # required, 32+ random characters: signs staff sessions
     admin_session_hours: int = int(_env("ADMIN_SESSION_HOURS", "12"))
+
+    # --- Internet-facing protection (app/security.py) ---
+    # Proxies in front of the app that append the visitor's address to X-Forwarded-For (Azure Container Apps,
+    # a load balancer, nginx ...): 1 for one such proxy. 0 = visitors connect directly, ignore the header.
+    # Too high a number lets visitors choose their own address and escape every rate limit.
+    trusted_proxy_hops: int = int(_env("TRUSTED_PROXY_HOPS", "0"))
+    max_body_mb: int = int(_env("MAX_BODY_MB", "20"))         # largest request (the Excel import); customer chat: 16 KB
 
     # --- Staff chat app (/) ---
     staff_session_days: int = int(_env("STAFF_SESSION_DAYS", "30"))
@@ -104,6 +111,8 @@ class Settings:
     # Messages per visitor: every message may call the AI, and these pages need no login
     public_chat_per_minute: int = int(_env("PUBLIC_CHAT_PER_MINUTE", "8"))
     public_chat_per_hour: int = int(_env("PUBLIC_CHAT_PER_HOUR", "60"))
+    # All visitors together, per day (UTC): caps the AI bill even when many addresses send messages
+    public_chat_per_day: int = int(_env("PUBLIC_CHAT_PER_DAY", "3000"))
     # Sites allowed to show /shop in a frame (the BigCommerce chat bubble); space-separated, * wildcards allowed.
     # No other site may frame any page of this app.
     shop_embed_origins: str = _env("SHOP_EMBED_ORIGINS",

@@ -168,8 +168,14 @@ pages in the same tab. Only the sites in `SHOP_EMBED_ORIGINS` (default gencbeaut
 shop page instead, create a BigCommerce web page and paste the iframe snippet from the admin tab in its HTML editor.
 In store, nothing is kept for the next shopper.
 
-Customer messages are rate-limited per visitor (`PUBLIC_CHAT_PER_MINUTE`, default 8; `PUBLIC_CHAT_PER_HOUR`, default 60),
-because each one may call the AI model. They appear in analytics as event `customer_chat` (CSV export) and in
+Customer messages are rate-limited per visitor (`PUBLIC_CHAT_PER_MINUTE`, default 8; `PUBLIC_CHAT_PER_HOUR`, default 60)
+and for all visitors together (`PUBLIC_CHAT_PER_DAY`, default 3000, which caps the AI bill), because each one may call
+the AI model. The counts are kept in the database, so they hold across restarts and replicas; behind a proxy set
+`TRUSTED_PROXY_HOPS` (section 9) or every visitor looks the same. Guardrails (`app/guardrails.py`): messages that try
+to take over the assistant get a fixed reply without calling the model; sentences in the AI's answer that promise
+discounts, refunds or free gifts, quote a price not on file, or mention internal data are removed; the AI is never
+told exact stock counts. Suggested products always come from the safety-filtered list, whatever the AI says.
+They appear in analytics as event `customer_chat` (CSV export) and in
 *Recent recommendations* as `customer:online` / `customer:store`; they never show in staff chat history.
 
 ## 3. Admin portal (managers, `/admin`)
@@ -340,6 +346,14 @@ from staff appear in Activity.
 for real use put it behind HTTPS: a reverse proxy (Caddy, nginx, IIS) with a certificate, or a cloud host
 (Azure App Service / Container Apps, AWS App Runner / ECS). Sessions use HTTP-only cookies and are marked
 secure automatically behind HTTPS.
+
+Before putting it on the internet:
+- `SECRET_KEY` must be 32+ random characters (the app will not start otherwise) and `ADMIN_PASSWORD` at least
+  12 characters (otherwise the admin portal stays off). Neither may be the value from `.env.example`.
+- Set `TRUSTED_PROXY_HOPS` to the number of proxies in front of the app (usually 1; the Docker image sets 1).
+  Rate limits and sign-in lockouts use the visitor address the proxy adds to `X-Forwarded-For`; with 0 behind a
+  proxy, all visitors share one address and the customer chat soon tells everyone to wait.
+- Requests over 16 KB to the customer chat and over `MAX_BODY_MB` (20) elsewhere are refused before being read.
 
 ## 10. Tests
 

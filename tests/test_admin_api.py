@@ -23,7 +23,7 @@ def client():
 
 
 def login(client):
-    r = client.post("/admin/api/login", json={"name": "Mina", "password": "test-pass"})
+    r = client.post("/admin/api/login", json={"name": "Mina", "password": "test-admin-pass"})
     assert r.status_code == 200
 
 

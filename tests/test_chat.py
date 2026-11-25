@@ -136,7 +136,7 @@ def test_chat_conversation_flow_and_analytics(client):
 @DB
 def test_admin_manages_staff_accounts(client):
     client.cookies.clear()
-    assert client.post("/admin/api/login", json={"name": "Boss", "password": "test-pass"}).status_code == 200
+    assert client.post("/admin/api/login", json={"name": "Boss", "password": "test-admin-pass"}).status_code == 200
     r = client.post("/admin/api/users", json={"username": "sora", "display_name": "Sora Kim"})
     assert r.status_code == 200
     temp = r.json()["temporary_password"]
@@ -199,7 +199,7 @@ def test_open_questions_answer_then_recommend(client):
 @DB
 def test_admin_analytics_and_csv(client):
     client.cookies.clear()
-    client.post("/admin/api/login", json={"name": "Boss", "password": "test-pass"})
+    client.post("/admin/api/login", json={"name": "Boss", "password": "test-admin-pass"})
     a = client.get("/admin/api/analytics?days=30").json()
     t = a["totals"]
     assert t["chats"] >= 10 and t["active_staff"] >= 1 and t["recommendations"] >= 4 and t["product_questions"] >= 2

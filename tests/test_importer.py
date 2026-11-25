@@ -222,7 +222,7 @@ def client():
     db.run_sql_file("schema.sql")
     db.run_sql_file("seed_sample.sql")
     c = TestClient(app)
-    assert c.post("/admin/api/login", json={"name": "Ops", "password": "test-pass"}).status_code == 200
+    assert c.post("/admin/api/login", json={"name": "Ops", "password": "test-admin-pass"}).status_code == 200
     from tests.conftest import staff_login
     staff_login(c)
     return c

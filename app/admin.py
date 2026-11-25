@@ -10,8 +10,7 @@ import base64
 import hashlib
 import hmac
 import re
-import time
-from collections import defaultdict
+import secrets
 from datetime import date
 from typing import Optional
 
@@ -26,6 +25,7 @@ from .ingest import EmbedError, embed_products
 from .models import AVOID, CATEGORIES, CONCERNS, RecommendRequest
 from .providers import ProviderError
 from .recommender import preview
+from .security import admin_password_problem, client_ip, failures, fingerprint, is_https, take
 from .storefront import AssistantSettings, load_assistant, save_assistant
 from .strategy import MAX_BUSINESS_SHARE, PRESETS, RankingSettings, audit, load_ranking, save_ranking
 
@@ -40,72 +40,67 @@ def set_provider(p) -> None:
 
 
 # ------------------------------------------------------------------ auth
-def _key() -> bytes:
-    raw = settings.secret_key or ("derived:" + settings.admin_password)
-    return hashlib.sha256(raw.encode()).digest()
-
-
-def _sign(payload: str) -> str:
-    return hmac.new(_key(), payload.encode(), hashlib.sha256).hexdigest()
-
-
-def make_token(name: str) -> str:
-    exp = int(time.time()) + settings.admin_session_hours * 3600
-    payload = f"{base64.urlsafe_b64encode(name.encode()).decode()}.{exp}"
-    return f"{payload}.{_sign(payload)}"
-
-
-def read_token(token: str | None) -> str | None:
-    try:
-        b64name, exp, sig = (token or "").split(".")
-        payload = f"{b64name}.{exp}"
-        if not hmac.compare_digest(sig, _sign(payload)) or int(exp) < time.time():
-            return None
-        return base64.urlsafe_b64decode(b64name.encode()).decode()
-    except Exception:
-        return None
+# Sessions live in the database (admin_sessions): signing out ends a session for good, and changing
+# ADMIN_PASSWORD ends every session that was opened with the old one. The cookie is a random token.
+LOGIN_WINDOW_S, MAX_FAILURES = 600, 5          # per visitor address
 
 
 def _portal_enabled() -> None:
     if not settings.admin_password:
         raise HTTPException(503, "Admin portal is disabled. Set ADMIN_PASSWORD in .env and restart.")
+    problem = admin_password_problem()
+    if problem:
+        raise HTTPException(503, f"Admin portal is disabled: {problem} Choose a longer password and restart.")
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def require_admin(request: Request) -> str:
     _portal_enabled()
-    name = read_token(request.cookies.get(COOKIE))
-    if not name:
+    token = request.cookies.get(COOKIE)
+    if not token:
         raise HTTPException(401, "Please sign in.")
-    return name
-
-
-_failures: dict[str, list[float]] = defaultdict(list)
+    with connect() as conn:
+        row = conn.execute("SELECT name, password_fp FROM admin_sessions WHERE token_hash = %s AND expires_at > now()",
+                           (_token_hash(token),)).fetchone()
+    if not row or not hmac.compare_digest(row["password_fp"], fingerprint(settings.admin_password)):
+        raise HTTPException(401, "Please sign in.")
+    return row["name"]
 
 
 class Login(BaseModel):
     name: str = Field(..., min_length=1, max_length=40)
-    password: str
+    password: str = Field(..., max_length=200)
 
 
 @router.post("/login")
 def login(body: Login, request: Request, response: Response):
     _portal_enabled()
-    ip = request.client.host if request.client else "?"
-    recent = [t for t in _failures[ip] if t > time.time() - 600]
-    _failures[ip] = recent
-    if len(recent) >= 5:
-        raise HTTPException(429, "Too many failed attempts. Try again in 10 minutes.")
-    if not hmac.compare_digest(body.password.encode(), settings.admin_password.encode()):
-        _failures[ip].append(time.time())
-        raise HTTPException(401, "Wrong password.")
-    name = body.name.strip()
-    response.set_cookie(COOKIE, make_token(name), httponly=True, samesite="strict",
+    key = f"admin-login:{client_ip(request)}"
+    with connect() as conn:
+        if failures(conn, key, LOGIN_WINDOW_S) >= MAX_FAILURES:
+            raise HTTPException(429, "Too many failed attempts. Try again in 10 minutes.")
+        if not hmac.compare_digest(body.password.encode(), settings.admin_password.encode()):
+            take(conn, key, LOGIN_WINDOW_S, MAX_FAILURES)
+            raise HTTPException(401, "Wrong password.")
+        name, token = body.name.strip(), secrets.token_urlsafe(32)
+        conn.execute("DELETE FROM admin_sessions WHERE expires_at < now()")
+        conn.execute("""INSERT INTO admin_sessions (token_hash, name, password_fp, expires_at)
+                        VALUES (%s, %s, %s, now() + make_interval(hours => %s))""",
+                     (_token_hash(token), name, fingerprint(settings.admin_password), settings.admin_session_hours))
+    response.set_cookie(COOKIE, token, httponly=True, samesite="strict", secure=is_https(request),
                         max_age=settings.admin_session_hours * 3600)
     return {"name": name}
 
 
 @router.post("/logout")
-def logout(response: Response):
+def logout(request: Request, response: Response):
+    token = request.cookies.get(COOKIE)
+    if token:
+        with connect() as conn:
+            conn.execute("DELETE FROM admin_sessions WHERE token_hash = %s", (_token_hash(token),))
     response.delete_cookie(COOKIE)
     return {"ok": True}
 
