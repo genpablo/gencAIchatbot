@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from app.admin import make_token, read_token
+from app.auth import make_staff_token, read_staff_token
 from app.models import CustomerProfile
 from app.scoring import score_candidates
 from app.strategy import PRESETS, RankingSettings
@@ -36,8 +36,8 @@ def test_slider_changes_the_winner():
     assert top(RankingSettings(business_share=70, priority_share=100)) == "PUSH"
 
 
-def test_login_token_roundtrip_and_tamper():
-    t = make_token("Mina")
-    assert read_token(t) == "Mina"
-    assert read_token(t[:-1] + ("0" if t[-1] != "0" else "1")) is None
-    assert read_token("garbage") is None and read_token(None) is None
+def test_staff_token_roundtrip_and_tamper():
+    t = make_staff_token(7, 3)
+    assert read_staff_token(t) == (7, 3)
+    assert read_staff_token(t[:-1] + ("0" if t[-1] != "0" else "1")) is None
+    assert read_staff_token("garbage") is None and read_staff_token(None) is None

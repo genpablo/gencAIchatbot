@@ -222,3 +222,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS chat_conversations_token ON chat_conversations
 
 -- v0.7: product photos on the customer assistant cards (safe to re-run)
 ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url TEXT;               -- main photo on the shop's image CDN
+
+-- v0.8: protection for the internet-facing app (safe to re-run)
+CREATE TABLE IF NOT EXISTS rate_limits (           -- message and sign-in counts per visitor and time window
+    key          TEXT NOT NULL,                    -- e.g. public-chat-min:203.0.113.7, admin-login:203.0.113.7
+    window_start TIMESTAMPTZ NOT NULL,
+    hits         INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (key, window_start)
+);
+CREATE TABLE IF NOT EXISTS admin_sessions (        -- admin portal sign-ins, so signing out really ends them
+    token_hash   TEXT PRIMARY KEY,                 -- sha256 of the cookie; the cookie itself is never stored
+    name         TEXT NOT NULL,                    -- the name the manager typed (written to the audit log)
+    password_fp  TEXT NOT NULL,                    -- keyed fingerprint of ADMIN_PASSWORD: changing it ends all sessions
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at   TIMESTAMPTZ NOT NULL
+);

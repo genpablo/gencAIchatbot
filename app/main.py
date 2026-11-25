@@ -9,6 +9,8 @@
 """
 from __future__ import annotations
 
+import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -19,14 +21,31 @@ from . import admin, chat, storefront
 from .analytics import track
 from .auth import require_staff
 from .auth import router as staff_router
+from .chat import check_feedback_owner
 from .config import settings
 from .db import connect, save_feedback
 from .models import FeedbackRequest, RecommendRequest
 from .embeddings import embed_model_label, embed_provider
 from .providers import ProviderError, get_provider
 from .recommender import recommend
+from .security import HOW_TO_FIX, BodyLimit, admin_password_problem, secret_key_problem
 
-app = FastAPI(title="K-Beauty Product Recommender", version="0.5.0")
+log = logging.getLogger("main")
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    """Refuse to start with a missing or example SECRET_KEY: staff sessions could be forged."""
+    problem = secret_key_problem()
+    if problem:
+        raise RuntimeError(f"{problem} {HOW_TO_FIX}")
+    if admin_password_problem():
+        log.error("Admin portal disabled: %s", admin_password_problem())
+    yield
+
+
+app = FastAPI(title="K-Beauty Product Recommender", version="0.5.0", lifespan=lifespan)
+app.add_middleware(BodyLimit)
 provider = get_provider()
 STATIC = Path(__file__).parent / "static"
 admin.set_provider(provider)
@@ -117,7 +136,7 @@ def post_recommend(req: RecommendRequest, user: dict = Depends(require_staff)):
 @app.post("/feedback")
 def post_feedback(fb: FeedbackRequest, user: dict = Depends(require_staff)):
     with connect() as conn:
-        if not save_feedback(conn, fb.log_id, fb.feedback, fb.note, fb.sku):
-            raise HTTPException(404, "log_id not found")
+        check_feedback_owner(conn, fb.log_id, user)
+        save_feedback(conn, fb.log_id, fb.feedback, fb.note, fb.sku)
         track(conn, "feedback", user=user, intent=fb.feedback, skus=[fb.sku] if fb.sku else None, log_id=fb.log_id)
     return {"ok": True}

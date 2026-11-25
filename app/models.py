@@ -53,8 +53,8 @@ class CustomerProfile(BaseModel):
 
 class RecommendRequest(BaseModel):
     profile: Optional[CustomerProfile] = None
-    text: Optional[str] = Field(None, description="Free-text note from the employee")
-    employee_id: Optional[str] = None
+    text: Optional[str] = Field(None, max_length=2000, description="Free-text note from the employee")
+    employee_id: Optional[str] = Field(None, max_length=100)
     top_n: int = Field(4, ge=1, le=6, description="Number of routine steps")
     options: Optional[int] = Field(None, ge=1, le=4, description="Options per step; default from admin settings")
     debug: bool = False
@@ -63,5 +63,5 @@ class RecommendRequest(BaseModel):
 class FeedbackRequest(BaseModel):
     log_id: int
     feedback: Literal["accepted", "swapped", "sold", "rejected"]
-    sku: Optional[str] = Field(None, description="The option that was sold or chosen")
-    note: Optional[str] = None
+    sku: Optional[str] = Field(None, max_length=100, description="The option that was sold or chosen")
+    note: Optional[str] = Field(None, max_length=500)

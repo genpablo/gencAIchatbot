@@ -13,7 +13,6 @@ import hmac
 import re
 import secrets
 import time
-from collections import defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
@@ -21,6 +20,7 @@ from pydantic import BaseModel, Field
 from .analytics import track
 from .config import settings
 from .db import connect
+from .security import client_ip, failures, is_https, signing_key, take
 
 router = APIRouter(prefix="/api", tags=["staff"])
 STAFF_COOKIE = "kb_staff"
@@ -57,13 +57,8 @@ def temp_password() -> str:
 
 
 # ------------------------------------------------------------------ signed tokens
-def _key() -> bytes:
-    raw = settings.secret_key or ("derived:" + settings.admin_password)
-    return hashlib.sha256(raw.encode()).digest()
-
-
 def sign(payload: str) -> str:
-    return hmac.new(_key(), payload.encode(), hashlib.sha256).hexdigest()
+    return hmac.new(signing_key(), payload.encode(), hashlib.sha256).hexdigest()
 
 
 def make_staff_token(user_id: int, version: int) -> str:
@@ -83,13 +78,9 @@ def read_staff_token(token: str | None) -> tuple[int, int] | None:
         return None
 
 
-def _secure(request: Request) -> bool:
-    return request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
-
-
 def set_session(response: Response, request: Request, user: dict) -> None:
     response.set_cookie(STAFF_COOKIE, make_staff_token(user["id"], user["session_version"]), httponly=True,
-                        samesite="lax", secure=_secure(request), max_age=settings.staff_session_days * 86400)
+                        samesite="lax", secure=is_https(request), max_age=settings.staff_session_days * 86400)
 
 
 # ------------------------------------------------------------------ users
@@ -125,7 +116,9 @@ def public_user(u: dict) -> dict:
             "must_change_password": u["must_change_password"]}
 
 
-_failures: dict[str, list[float]] = defaultdict(list)
+LOGIN_WINDOW_S = 900
+MAX_FAILURES_PER_ACCOUNT = 8       # per address and username, per 15 minutes
+MAX_FAILURES_PER_ADDRESS = 30      # per address over all usernames (trying one password on many accounts)
 
 
 class LoginBody(BaseModel):
@@ -135,19 +128,20 @@ class LoginBody(BaseModel):
 
 @router.post("/login")
 def login(body: LoginBody, request: Request, response: Response):
-    key = f"{request.client.host if request.client else '?'}|{body.username.strip().lower()}"
-    _failures[key] = [t for t in _failures[key] if t > time.time() - 900]
-    if len(_failures[key]) >= 8:
-        raise HTTPException(429, "Too many attempts. Wait 15 minutes or ask a manager to reset your password.")
+    ip, username = client_ip(request), body.username.strip().lower()
+    per_account, per_address = f"staff-login:{ip}|{username}", f"staff-login:{ip}"
     with connect() as conn:
+        if (failures(conn, per_account, LOGIN_WINDOW_S) >= MAX_FAILURES_PER_ACCOUNT
+                or failures(conn, per_address, LOGIN_WINDOW_S) >= MAX_FAILURES_PER_ADDRESS):
+            raise HTTPException(429, "Too many attempts. Wait 15 minutes or ask a manager to reset your password.")
         u = conn.execute(f"SELECT {USER_COLS}, password_hash FROM staff_users WHERE username = %s",
-                         (body.username.strip().lower(),)).fetchone()
+                         (username,)).fetchone()
         if not u or not u["is_active"] or not verify_password(body.password, u["password_hash"]):
-            _failures[key].append(time.time())
+            take(conn, per_account, LOGIN_WINDOW_S, MAX_FAILURES_PER_ACCOUNT)
+            take(conn, per_address, LOGIN_WINDOW_S, MAX_FAILURES_PER_ADDRESS)
             raise HTTPException(401, "Wrong username or password.")
         conn.execute("UPDATE staff_users SET last_login_at = now() WHERE id = %s", (u["id"],))
         track(conn, "login", user=u, meta={"user_agent": request.headers.get("user-agent", "")[:200]})
-    _failures.pop(key, None)
     set_session(response, request, u)
     return {"user": public_user(u)}
 
@@ -165,7 +159,7 @@ def me(user: dict = Depends(require_staff)):
 
 
 class PasswordBody(BaseModel):
-    current: str
+    current: str = Field(..., max_length=200)
     new: str = Field(..., max_length=200)
 
 

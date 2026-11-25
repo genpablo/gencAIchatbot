@@ -8,8 +8,8 @@ import os
 if os.environ.get("TEST_DATABASE_URL"):
     os.environ["DATABASE_URL"] = os.environ["TEST_DATABASE_URL"]
 os.environ["LLM_PROVIDER"] = "mock"
-os.environ["ADMIN_PASSWORD"] = "test-pass"
-os.environ["SECRET_KEY"] = "test-secret"
+os.environ["ADMIN_PASSWORD"] = "test-admin-pass"
+os.environ["SECRET_KEY"] = "test-secret-key-for-the-test-suite-0123456789"
 
 
 def staff_login(client, username="tester", password="test-pass-123"):
